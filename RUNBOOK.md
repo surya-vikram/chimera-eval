@@ -37,7 +37,7 @@ within configured limits and fails grading if no valid judgment is obtained.
 Use Python 3.12 and Docker. Build once from this repository:
 
 ```bash
-docker build -t chimera-eval:0.1.0 .
+docker build -t suryavikram6/chimera-eval:0.1.1 .
 ```
 
 The image contains preparation/native graders, not CUDA or vLLM. `CODE_IMAGE` names the
@@ -60,7 +60,7 @@ docker run --rm --network host \
   -v "$PWD:/repo:ro" -v /datasets/chimera-eval:/data \
   -v /path/to/tokenizer:/tokenizer:ro \
   -e EVAL_ROOT=/repo -e DATA_DIR=/data -e PREP_TOKENIZER=/tokenizer \
-  --entrypoint bash chimera-eval:0.1.0 /repo/run_eval.sh prepare
+  --entrypoint bash suryavikram6/chimera-eval:0.1.1 /repo/run_eval.sh prepare
 ```
 
 Initial preparation downloads public source data, including the approximately 11 GB HELMET
@@ -95,7 +95,7 @@ docker run --rm --network host \
   -v /datasets/chimera-eval-results:/results \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -e EVAL_ROOT=/repo -e DATA_DIR=/data -e OUTPUT_DIR=/results \
-  --entrypoint bash chimera-eval:0.1.0 /repo/run_eval.sh
+  --entrypoint bash suryavikram6/chimera-eval:0.1.1 /repo/run_eval.sh
 ```
 
 Both model servers need `/v1/models`, `/v1/chat/completions`, and vLLM's `/tokenize` route.

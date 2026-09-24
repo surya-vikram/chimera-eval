@@ -48,7 +48,7 @@ def settings():
         c[role + '_SAMPLING'] = sampling
         if role == 'JUDGE':
             c[role + '_SAMPLING']['seed'] = c['SEED']
-    c.update(SPLIT=env('SPLIT', 'main_test'), TASKS=env('TASKS', ''), CODE_IMAGE=env('CODE_IMAGE', 'chimera-eval:0.1.0'),
+    c.update(SPLIT=env('SPLIT', 'main_test'), TASKS=env('TASKS', ''), CODE_IMAGE=env('CODE_IMAGE', 'suryavikram6/chimera-eval:0.1.1'),
              REGRADES_IDS=env('REGRADES_IDS',''),
              TASK_SAMPLE_COUNTS=json.loads(env('TASK_SAMPLE_COUNTS_JSON', '{}')),
              EVAL_CONTEXT_BUCKETS=[int(x) for x in env('EVAL_CONTEXT_BUCKETS', '').split(',') if x],

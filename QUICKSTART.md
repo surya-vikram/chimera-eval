@@ -22,7 +22,7 @@ placeholders. For subsequent runs, put these values into the existing defaults i
 
 ```bash
 export PYTHON_BIN="/home/surya/workspace/eval-env/bin/python"
-export DATA_DIR="/home/surya/workspace/eval-data-quality-v2"
+export DATA_DIR="/home/surya/workspace/eval-data-quality-v3"
 export OUTPUT_DIR="/home/surya/workspace/eval-results"
 export RUN_NAME="my-model-main-pass2-01"
 export MODEL_URL="http://YOUR_TARGET_HOST:8000/v1"
@@ -91,7 +91,7 @@ container does not host the models and needs no GPU. Docker is needed for isolat
 Python execution. Build the image, then mount the repo so script edits take effect:
 
 ```bash
-docker build -t chimera-eval:0.1.0 .
+docker build -t suryavikram6/chimera-eval:0.1.1 .
 docker run --rm --network host \
   -v "$PWD:/repo:ro" \
   -v /absolute/path/to/prepared-data:/data:ro \
@@ -99,7 +99,7 @@ docker run --rm --network host \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -e EVAL_ROOT=/repo -e DATA_DIR=/data -e OUTPUT_DIR=/results \
   -e PYTHON_BIN=python3 \
-  --entrypoint bash chimera-eval:0.1.0 /repo/run_eval.sh
+  --entrypoint bash suryavikram6/chimera-eval:0.1.1 /repo/run_eval.sh
 ```
 
 Use environment-default assignments in the script so these mounted paths override

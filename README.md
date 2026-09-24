@@ -4,6 +4,9 @@ Start with [QUICKSTART.md](QUICKSTART.md) for the prepared local data and Docker
 For disconnected systems, use [AIRGAPPED_RUN.md](AIRGAPPED_RUN.md), including
 image transfer, prepared split sizes, configuration, and the offline launch command.
 
+Current image: `suryavikram6/chimera-eval:0.1.1`. Use dataset v3; see
+[MCQA metadata repair](METADATA_REPAIR.md). Main-test prompts and scores are unaffected.
+
 Endpoint-only evaluation and preparation of three family-disjoint partitions: `rl_train`,
 `rl_val`, and `main_test`. No Slime training code lives here.
 

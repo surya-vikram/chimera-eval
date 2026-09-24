@@ -76,7 +76,7 @@ def instruction_checks(text, ids, kwargs, prompt):
 
 class Grader:
     def __init__(self, judge=None, judge_max_tokens=8192, judge_context=32768,
-                 code_image="chimera-eval:0.1.0", code_timeout=15, code_concurrency=2,
+                 code_image="suryavikram6/chimera-eval:0.1.1", code_timeout=15, code_concurrency=2,
                  judge_audit_dir=None, judge_attempts=3, judge_max_retry_tokens=None):
         self.judge = judge
         self.judge_max_tokens, self.judge_context = judge_max_tokens, judge_context
@@ -159,6 +159,11 @@ class Grader:
                 raise GradingError("Math verifier failed: " + proc.stderr[-500:])
             return result(**json.loads(proc.stdout))
         if kind == "choice":
+            if row.get('task') == 'mcqa' and meta.get('output_regex') == r'\boxed\{\s*([A-Za-z0-9])\s*\}':
+                raise GradingError('Broken v2 MCQA extraction metadata; use the quality-v3-mcqa-extraction dataset')
+            if row.get('task') == 'mcqa' and (str(meta['answer']) not in meta['labels'] or
+                    len(set(meta['labels'])) != len(meta['labels']) or len(meta['labels']) < 2):
+                raise GradingError('Invalid MCQA gold/options; quarantine instead of scoring the candidate')
             # One explicit final label, never first letter anywhere in reasoning.
             match = re.fullmatch(r"\s*[([]?([A-Z0-9]+)[)\].]?\s*", final)
             chosen = match.group(1) if match else None

@@ -9,14 +9,14 @@ offline evaluation does not.
 ## 1. Prepare the transfer on an internet-connected machine
 
 ```bash
-docker pull suryavikram6/chimera-eval:0.1.0
-docker save -o chimera-eval-image.tar suryavikram6/chimera-eval:0.1.0
+docker pull suryavikram6/chimera-eval:0.1.1
+docker save -o chimera-eval-image.tar suryavikram6/chimera-eval:0.1.1
 sha256sum chimera-eval-image.tar > chimera-eval-image.tar.sha256
 ```
 
-Published image index digest:
-`sha256:648423eb24fb19dda4a303bb08a99179b1fa859f4f4dc666d59b7d2af59b7e51`.
-Local image size is 314,238,595 bytes (about 300 MiB); archive size can differ.
+Release 0.1.1 includes the MCQA metadata safeguard and corrected preparation adapter.
+Use `docker image inspect` to record the pulled image digest in your run manifest.
+The evaluator image is approximately 300 MiB locally; archive size can differ.
 The image includes evaluation dependencies and grader resources, not datasets,
 model weights, or model-serving software. Do not build or install dependencies
 on the disconnected host.
@@ -41,7 +41,7 @@ For evaluation only (about 82 MiB plus the manifest):
 ```bash
 hf download surya-vikram/chimera-eval-data \
   --repo-type dataset \
-  --revision acee68097ec2058c75cbdc06d9353405f84048ba \
+  --revision 0c4b5e43d163f333422fa0855e6f1fb708acbc7a \
   --include manifest.json splits/main_test.jsonl \
   --local-dir ./prepared-data
 ```
@@ -51,7 +51,7 @@ Or download all three splits (about 544 MiB) for evaluation and future RL use:
 ```bash
 hf download surya-vikram/chimera-eval-data \
   --repo-type dataset \
-  --revision acee68097ec2058c75cbdc06d9353405f84048ba \
+  --revision 0c4b5e43d163f333422fa0855e6f1fb708acbc7a \
   --include README.md manifest.json 'splits/*.jsonl' \
   --local-dir ./prepared-data
 ```
@@ -87,15 +87,20 @@ their own preloaded images, weights, tokenizers, and chat templates.
 
 ### Current frozen split sizes
 
-Measured on 2026-09-25, revised quality-v2 dataset. Sizes are uncompressed JSONL;
+Measured on 2026-09-25, revised quality-v3-mcqa-extraction dataset. Sizes are uncompressed JSONL;
 they exclude source caches, reserved pools, and manifests. MiB = 1,048,576 bytes.
 
 | Split | Prompts | Bytes | MiB |
 |---|---:|---:|---:|
-| `rl_train` | 86,816 | 482,766,794 | 460.40 |
-| `rl_val` | 128 | 1,202,222 | 1.15 |
+| `rl_train` | 86,647 | 482,209,114 | 459.87 |
+| `rl_val` | 128 | 1,202,230 | 1.15 |
 | `main_test` | 3,982 | 85,973,993 | 81.99 |
-| Total | 90,926 | 569,943,009 | 543.54 |
+| Total | 90,757 | 569,385,337 | 543.01 |
+
+V3 repairs MCQA extraction and excludes 169 invalid training records. The 3,982-row
+`main_test` JSONL is byte-identical to v2; no full evaluation rerun is required for
+this repair. Use the new manifest with the new snapshot, not a mixed data directory.
+See [METADATA_REPAIR.md](METADATA_REPAIR.md) for validation and old-revision details.
 
 Splits are checked for exact/family overlap; this is not a guarantee against all
 semantic near-duplicates. Long-context tasks are evaluation-only. Data stays
@@ -106,7 +111,7 @@ outside GitHub and outside the evaluator image.
 ```bash
 sha256sum -c chimera-eval-image.tar.sha256
 docker load -i chimera-eval-image.tar
-docker image inspect suryavikram6/chimera-eval:0.1.0
+docker image inspect suryavikram6/chimera-eval:0.1.1
 ```
 
 Choose a data directory on the offline host, replacing the example absolute path:
@@ -170,9 +175,9 @@ docker run --rm --pull=never --network host \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -e EVAL_ROOT=/repo -e DATA_DIR=/data -e OUTPUT_DIR=/results \
   -e PYTHON_BIN=python3 \
-  -e CODE_IMAGE=suryavikram6/chimera-eval:0.1.0 \
+  -e CODE_IMAGE=suryavikram6/chimera-eval:0.1.1 \
   -e HF_HUB_OFFLINE=1 -e HF_DATASETS_OFFLINE=1 \
-  --entrypoint bash suryavikram6/chimera-eval:0.1.0 /repo/run_eval.sh
+  --entrypoint bash suryavikram6/chimera-eval:0.1.1 /repo/run_eval.sh
 ```
 
 The repo mount supplies the script and evaluator code. Python execution workers

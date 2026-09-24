@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "chimera-eval"
-version = "0.1.0"
+version = "0.1.1"
 requires-python = ">=3.12"
 description = "Endpoint-only, dataset-aware evaluation and leakage-audited split preparation"
 dependencies = []

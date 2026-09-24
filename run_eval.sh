@@ -58,7 +58,7 @@ fi
 # Pilot larger caps (e.g. {"math":32768}) before freezing a comparison protocol.
 # Fixed-budget evaluation: finish_reason=length scores zero and is reported.
 # Compare models at the same task caps; never silently shrink prompts.
-export CODE_IMAGE="${CODE_IMAGE:-chimera-eval:0.1.0}"
+export CODE_IMAGE="${CODE_IMAGE:-suryavikram6/chimera-eval:0.1.1}"
 export CODE_TIMEOUT="${CODE_TIMEOUT:-15}"
 export CODE_CONCURRENCY="${CODE_CONCURRENCY:-2}"
 export PREP_TOKENIZER="${PREP_TOKENIZER:-}" # Local tokenizer path for frozen preparation admission.

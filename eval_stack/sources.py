@@ -84,9 +84,8 @@ def adapt(spec, row, index, revision):
             raise Rejected("placeholder_or_missing_gold")
         verification = {"answer": row["expected_answer"],
                         "output_regex": row.get("template_metadata", {}).get("output_regex")}
-        if verification['output_regex']:
-            # Publisher metadata contains JSON-escaped regex text one level too deep.
-            verification['output_regex'] = verification['output_regex'].replace('\\\\', '\\')
+        # JSON/Parquet loaders have already decoded strings. Preserve publisher
+        # regexes verbatim: \\boxed requires a literal-backslash regex escape.
         verifier = "math" if kind == "nmath" and "judge" not in row.get("verifier_type", "") else "equivalence"
         if kind == "mcqa":
             verifier = "choice"
@@ -94,6 +93,10 @@ def adapt(spec, row, index, revision):
             verification["labels"] = [str(k) for o in opts for k, v in o.items() if v is not None]
             if not verification["labels"]:
                 raise Rejected("missing_option_labels")
+            if (str(verification['answer']) not in verification['labels'] or
+                    len(set(verification['labels'])) != len(verification['labels']) or
+                    len(verification['labels']) < 2):
+                raise Rejected('invalid_gold_or_duplicate_option_labels')
         stratum = str(row.get("metadata", {}).get("topic", "default"))
     elif kind in ("arc", "mmlu"):
         verifier = "choice"
