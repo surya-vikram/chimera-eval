@@ -2,7 +2,9 @@
 
 Run the evaluator on a Linux AMD64 Docker host with target and judge models
 already hosted on reachable internal vLLM endpoints. No API keys are required.
-The evaluator needs no GPU; model serving is separate.
+The evaluator needs no GPU; model serving is separate. Downloading the private
+dataset on the connected machine does require Hugging Face authentication;
+offline evaluation does not.
 
 ## 1. Prepare the transfer on an internet-connected machine
 
@@ -19,7 +21,53 @@ The image includes evaluation dependencies and grader resources, not datasets,
 model weights, or model-serving software. Do not build or install dependencies
 on the disconnected host.
 
-Transfer the image archive/checksum, this repository, and prepared data separately.
+### Download the frozen dataset
+
+Dataset: [surya-vikram/chimera-eval-data](https://huggingface.co/datasets/surya-vikram/chimera-eval-data).
+It is private: log in with an account/token that has read access. Never put a
+token in this repository, a transfer archive, or the evaluation script.
+
+On the internet-connected machine, install the download CLI in a separate environment:
+
+```bash
+python3 -m venv hf-download-env
+source hf-download-env/bin/activate
+python -m pip install 'huggingface_hub==0.36.0'
+hf auth login
+```
+
+For evaluation only (about 82 MiB plus the manifest):
+
+```bash
+hf download surya-vikram/chimera-eval-data \
+  --repo-type dataset \
+  --revision acee68097ec2058c75cbdc06d9353405f84048ba \
+  --include manifest.json splits/main_test.jsonl \
+  --local-dir ./prepared-data
+```
+
+Or download all three splits (about 544 MiB) for evaluation and future RL use:
+
+```bash
+hf download surya-vikram/chimera-eval-data \
+  --repo-type dataset \
+  --revision acee68097ec2058c75cbdc06d9353405f84048ba \
+  --include README.md manifest.json 'splits/*.jsonl' \
+  --local-dir ./prepared-data
+```
+
+Both commands pin the same published snapshot. Choose one; no preparation or
+conversion step is needed. Package only the data/manifest, excluding CLI caches
+and authentication state:
+
+```bash
+tar -czf chimera-eval-data.tar.gz -C prepared-data manifest.json splits
+sha256sum chimera-eval-data.tar.gz > chimera-eval-data.tar.gz.sha256
+```
+
+Transfer both archives (image and data), both checksum files, and this repository
+using your approved transfer mechanism. Do not transfer the CLI environment or
+Hugging Face login cache. The data archive contains this ready-to-use layout:
 For main evaluation the required data layout is:
 
 ```text
@@ -30,10 +78,12 @@ prepared-data/
 ```
 
 Keep the matching manifest unchanged: the runner checks the split content hash.
-Transfer the complete prepared-data directory if you also need split audits,
-reserved pools, preparation provenance, or future RL data. Do not run dataset
-download/preparation commands offline. Model servers need their own preloaded
-images, weights, tokenizers, and chat templates.
+The all-splits download additionally includes `rl_train.jsonl` and `rl_val.jsonl`
+under `splits/`. The Hugging Face snapshot contains the three splits and manifest,
+not the original source caches or reserved pools; reproducing preparation/audits
+that require those artifacts needs a separate full preparation archive.
+Do not run dataset download/preparation commands offline. Model servers need
+their own preloaded images, weights, tokenizers, and chat templates.
 
 ### Current frozen split sizes
 
@@ -58,6 +108,21 @@ sha256sum -c chimera-eval-image.tar.sha256
 docker load -i chimera-eval-image.tar
 docker image inspect suryavikram6/chimera-eval:0.1.0
 ```
+
+Choose a data directory on the offline host, replacing the example absolute path:
+
+```bash
+sha256sum -c chimera-eval-data.tar.gz.sha256
+mkdir -p /absolute/path/to/prepared-data
+tar -xzf chimera-eval-data.tar.gz -C /absolute/path/to/prepared-data
+test -f /absolute/path/to/prepared-data/manifest.json
+test -f /absolute/path/to/prepared-data/splits/main_test.jsonl
+```
+
+Use a fresh destination to avoid mixing dataset revisions. In the Docker command
+in section 4, mount this exact directory at `/data`; `DATA_DIR=/data` then points
+the runner to its manifest and splits. Keep `SPLIT=main_test` in `run_eval.sh` for
+the main evaluation. Neither Hugging Face access nor its token is needed offline.
 
 Docker Engine must already be installed. Use the fully qualified image name for
 both the evaluator and Python workers; otherwise Docker may try to pull a missing
