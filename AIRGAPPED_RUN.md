@@ -15,8 +15,8 @@ sha256sum chimera-eval-image.tar > chimera-eval-image.tar.sha256
 ```
 
 Release 0.1.1 includes the MCQA metadata safeguard and corrected preparation adapter.
-Use `docker image inspect` to record the pulled image digest in your run manifest.
-The evaluator image is approximately 300 MiB locally; archive size can differ.
+Image index digest: `sha256:af4dad578d9afc614f61139c134cf36166de7219369cecd33eb9db782e4296e7`.
+Local image size: 314,240,670 bytes (about 300 MiB); archive size can differ.
 The image includes evaluation dependencies and grader resources, not datasets,
 model weights, or model-serving software. Do not build or install dependencies
 on the disconnected host.

@@ -3,6 +3,24 @@
 This records software and focused live checks, not a full model benchmark or independent
 judge-quality certification. See QUICKSTART.md to run evaluation.
 
+## Release 0.1.1 / dataset v3 follow-up
+
+The MCQA repair is documented in [METADATA_REPAIR.md](METADATA_REPAIR.md).
+Current inventory is 86,647 rl_train, 128 rl_val, 3,982 main_test. The older
+inventory below describes the preceding v2 release; main_test is unchanged.
+
+- All **41 release tests passed inside the new image**, including Docker sandbox
+  tests, with the evaluator container's network disabled. This is not a complete
+  live endpoint evaluation with internet egress blocked.
+- All 9,339 retained MCQA records passed correct/wrong-label and malformed-output
+  checks; 4,652 records repaired; 169 invalid training rows quarantined.
+- Five exact/family overlap checks remained zero. Main-test bytes/SHA-256 unchanged.
+- Image built from a clean Git archive of `c166132`, excluding uncommitted MixRL
+  service work. Image index digest:
+  `sha256:af4dad578d9afc614f61139c134cf36166de7219369cecd33eb9db782e4296e7`.
+- HF v3 revision: `0c4b5e43d163f333422fa0855e6f1fb708acbc7a`.
+- No full model benchmark rerun or RL optimizer experiment is claimed for this fix.
+
 ## Accepted release scope
 
 - Three frozen partitions: 86,816 rl_train, 128 rl_val, 3,982 main_test.
