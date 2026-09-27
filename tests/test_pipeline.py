@@ -3,6 +3,8 @@ import http.server
 import io
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 import tempfile
 import threading
@@ -51,7 +53,36 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(body['max_tokens'],128)
         self.assertEqual(body['seed'],12)
 
+    def test_launcher_uses_mounted_code_instead_of_image_workdir(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for name in ('mounted', 'image'):
+                package = root/name/'eval_stack'
+                package.mkdir(parents=True)
+                (package/'__init__.py').write_text('')
+                (package/'cli.py').write_text(f'print({name!r})')
+            env = {'PATH': os.environ['PATH'], 'PYTHON_BIN': sys.executable,
+                   'EVAL_ROOT': str(root/'mounted'), 'TASK_SAMPLE_COUNTS_JSON': '{}'}
+            result = subprocess.run(['bash', str(Path(__file__).resolve().parents[1]/'eval_entrypoint.sh')],
+                                    cwd=root/'image', env=env, capture_output=True, text=True, check=True)
+            self.assertEqual(result.stdout.strip(), 'mounted')
+
     def test_full_pipeline_resume_and_config_guard(self):
+        self.check_pipeline(0, 0)
+
+    def test_token_budget_pipeline_resume_and_config_guard(self):
+        self.check_pipeline(256, 10000)
+
+    def test_target_only_token_budget(self):
+        self.check_pipeline(256, 0)
+
+    def test_judge_only_token_budget(self):
+        self.check_pipeline(0, 10000)
+
+    def test_regrade_honors_judge_budget_without_target_generation(self):
+        self.check_pipeline(256, 10000, regrade_check=True)
+
+    def check_pipeline(self, model_capacity, judge_capacity, regrade_check=False):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             rows = []
@@ -62,14 +93,51 @@ class PipelineTests(unittest.TestCase):
             write_jsonl(root/'splits/main_test.jsonl',rows)
             write_json(root/'manifest.json',{'complete_inventory':False})
             cfg = {'DATA_DIR':td,'OUTPUT_DIR':str(root/'out'),'MODEL_URL':self.url,'JUDGE_URL':self.url,
-                   'MODEL_NAME':'fixture','JUDGE_NAME':'fixture','N_SAMPLES':'4','PASS_K':'1,4','MAX_PENDING':'2'}
+                   'MODEL_NAME':'fixture','JUDGE_NAME':'fixture','N_SAMPLES':'4','PASS_K':'1,4','MAX_PENDING':'2',
+                   'MODEL_KV_CACHE_NUM_TOKENS': str(model_capacity),
+                   'JUDGE_KV_CACHE_NUM_TOKENS': str(judge_capacity)}
             with patch.dict(os.environ,cfg,clear=True), contextlib.redirect_stdout(io.StringIO()):
                 a = evaluate()
+                expected_roles = {role for role, capacity in [('MODEL', model_capacity), ('JUDGE', judge_capacity)] if capacity}
+                self.assertEqual(set(a['kv_token_budgets']), expected_roles)
+                for role, capacity in [('MODEL', model_capacity), ('JUDGE', judge_capacity)]:
+                    if capacity:
+                        entry = a['kv_token_budgets'][role]
+                        self.assertEqual(entry['capacity'], capacity)
+                        self.assertEqual(entry['endpoint'], self.url)
+                        self.assertGreater(entry['peak_reserved_tokens'], 0)
+                        self.assertLessEqual(entry['peak_reserved_tokens'], capacity)
+                for path in (root/'out/evaluation/samples').glob('*.json'):
+                    for turn in json.loads(path.read_text())['turns']:
+                        admission = turn['response']['kv_admission']
+                        if model_capacity:
+                            self.assertEqual(admission['reserved_tokens'], 138)
+                        else:
+                            self.assertIsNone(admission)
                 first = len([x for x in Handler.requests if x[0].endswith('completions')])
                 b = evaluate()
                 self.assertEqual(first,len([x for x in Handler.requests if x[0].endswith('completions')]))
                 self.assertEqual(a['tasks'],b['tasks'])
                 self.assertEqual(a['tasks']['exact']['pass']['4'],1.)
+                self.assertEqual(a['tasks']['exact']['pass']['1'],1.)
+                audit = json.loads((root/'out/evaluation/audit/report.json').read_text())
+                self.assertTrue(audit['coverage_complete'])
+                self.assertEqual(audit['overall']['valid_samples'], 8)
+                if regrade_check:
+                    from eval_stack.regrade import regrade
+                    start = len(Handler.requests)
+                    with patch.dict(os.environ, {'REGRADES_SOURCE': str(root/'out/evaluation'), 'RUN_NAME': 'regraded'}):
+                        result = regrade()
+                    self.assertEqual(result['infrastructure_errors'], 0)
+                    new_completions = [body for route, body in Handler.requests[start:] if route.endswith('completions')]
+                    self.assertTrue(new_completions)
+                    self.assertTrue(all(body.get('response_format') for body in new_completions))
+                    attempts = list((root/'out/regraded/judge_attempts').glob('*.json'))
+                    self.assertTrue(attempts)
+                    for path in attempts:
+                        admission = json.loads(path.read_text())['response']['kv_admission']
+                        self.assertEqual(admission['reserved_tokens'], 8202)
+                        self.assertLessEqual(admission['reserved_tokens'], judge_capacity)
                 self.assertIsNone(a['tasks']['quality']['pass']['4'])
                 os.environ['MODEL_TEMPERATURE'] = '.9'
                 with self.assertRaises(ValueError): evaluate()

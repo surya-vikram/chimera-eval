@@ -16,40 +16,24 @@ only, not RL training. Models must already be hosted; no API keys are needed.
 cd /home/surya/workspace/repos/chimera-eval
 ```
 
-For your first run, paste these settings into your shell and replace the endpoint/model
-placeholders. For subsequent runs, put these values into the existing defaults in
-`run_eval.sh` so that one script is your entrypoint:
+Edit the configuration block in `run_eval.sh`: set `DATA_PATH`, `OUTPUT_PATH`,
+`RUN_NAME`, target/judge endpoint URLs and served model IDs, actual context limits,
+request or token budgets, sample counts, and tasks. Then launch:
 
 ```bash
-export PYTHON_BIN="/home/surya/workspace/eval-env/bin/python"
-export DATA_DIR="/home/surya/workspace/eval-data-quality-v3"
-export OUTPUT_DIR="/home/surya/workspace/eval-results"
-export RUN_NAME="my-model-main-pass2-01"
-export MODEL_URL="http://YOUR_TARGET_HOST:8000/v1"
-export MODEL_NAME="YOUR_SERVED_TARGET_NAME"
-export JUDGE_URL="http://YOUR_JUDGE_HOST:8000/v1"
-export JUDGE_NAME="YOUR_SERVED_JUDGE_NAME"
-export MODEL_CONTEXT=131072  # Replace with actual supported/served limit.
-export JUDGE_CONTEXT=131072  # Replace with actual supported/served limit.
-export MODEL_CONCURRENCY=16
-export JUDGE_CONCURRENCY=8
-export SHARED_ENDPOINT_CONCURRENCY=24
-export MAX_PENDING=48
-export REQUEST_TIMEOUT=1800
-export N_SAMPLES=2
-export PASS_K=2
-export SEED=42
-export SPLIT=main_test
-export TASK_SAMPLE_COUNTS_JSON='{}'
+bash run_eval.sh
 ```
 
-The script honours these environment settings. The last setting selects all rows of each selected task in the revised frozen split
-(3,982 total before context/task selection), rather than the old 3,999-row allocation.
-To reduce tasks individually, replace `{}` with e.g. `{"gsm8k":50,"math500":30}`:
-unspecified tasks keep their frozen counts. Alternatively remove that override and
-edit the per-task `TASK_SAMPLES` block, but reduce counts to the actual revised
-inventory first (BiGGen 390, StructEval 194, and one quarantined long-context row).
-Actual full task counts are in `DATA_DIR/manifest.json` under `task_counts.main_test`.
+The default evaluates one prompt per task across all domains. To run the frozen
+inventory, set `LIMIT_PER_TASK=0`; for two responses per prompt set `N_SAMPLES=2`
+and `PASS_K="1,2"`. Leave `TASK_SAMPLE_COUNTS_JSON='{}'` to keep the frozen per-task
+counts (3,982 prompts total before context selection), or set a smaller count such
+as `{"gsm8k":50,"math500":30}`. Actual counts are in `DATA_PATH/manifest.json`.
+
+Use `bash run_eval.sh --dry-run` to check local prerequisites and preview Docker's
+command without launching a container. The offline launcher fails if either image,
+the selected data manifest, or the split is missing. It does not download or pull.
+For exact options, see [AIRGAPPED_RUN.md](AIRGAPPED_RUN.md).
 
 Sampling fields: `MODEL_TEMPERATURE`, `MODEL_TOP_P`, `MODEL_TOP_K`, and
 `MODEL_REPETITION_PENALTY`. Keep judge sampling fixed across model comparisons.
@@ -71,24 +55,16 @@ total window. Frozen preparation changes and actual token counts are recorded.
 First run a small diagnostic:
 
 ```bash
-RUN_NAME=my-model-pilot-01 LIMIT_PER_TASK=1 bash run_eval.sh
+Set `RUN_NAME=my-model-pilot-01` in the config block and keep `LIMIT_PER_TASK=1` for a pilot.
 ```
 
-Then evaluate the selected full inventory:
-
-```bash
-bash run_eval.sh
-```
-
-If you replace an environment-default assignment with a literal assignment in the
-script, external overrides will no longer override that field. Preserve the existing
-`${NAME:-default}` pattern when you want command-line overrides for pilot runs.
+Then set `LIMIT_PER_TASK=0` and choose a new `RUN_NAME` for the full inventory.
 
 ## On another Linux host: one CPU evaluator image
 
 Copy this repo and the **entire prepared data directory** to that host. The evaluation
 container does not host the models and needs no GPU. Docker is needed for isolated
-Python execution. Build the image, then mount the repo so script edits take effect:
+Python execution. Use `run_eval.sh` for normal runs. The following lower-level command invokes the Python entrypoint directly:
 
 ```bash
 docker build -t suryavikram6/chimera-eval:0.1.1 .
@@ -99,7 +75,7 @@ docker run --rm --network host \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -e EVAL_ROOT=/repo -e DATA_DIR=/data -e OUTPUT_DIR=/results \
   -e PYTHON_BIN=python3 \
-  --entrypoint bash suryavikram6/chimera-eval:0.1.1 /repo/run_eval.sh
+  --entrypoint bash suryavikram6/chimera-eval:0.1.1 /repo/eval_entrypoint.sh
 ```
 
 Use environment-default assignments in the script so these mounted paths override
@@ -118,6 +94,41 @@ Look under `OUTPUT_DIR/RUN_NAME/`:
 - `samples/`: saved generated answers and grades.
 - `judge_attempts/`: auditable judge requests, outputs, and retries.
 - `config.json`: exact configuration and data/code fingerprint.
+- `audit/report.md`: coverage, failures, and prompt/response token distributions by domain and task.
+- `audit/report.json`: percentiles, histograms, judge usage, per-turn/trajectory statistics, and recomputed scores.
+- `audit/samples.jsonl`: one audit entry for every expected sample, including missing/pending entries.
+
+To audit or refresh an existing run while it is running (no endpoint calls):
+
+```bash
+python3 -m eval_stack.run_audit \
+  --run-dir /absolute/path/to/results/my-run \
+  --data-dir /absolute/path/to/prepared-data
+```
+
+The audit verifies the split hash and reproduces the saved run selection/fingerprint.
+It scans every expected sample, never only a random subset. A live scan is explicitly
+marked as a running snapshot and can see records at different moments. All-domain
+frozen prompt distributions use preparation-tokenizer counts; actual prompt and
+response distributions use server-reported usage for generated turns. Missing usage
+is counted separately, never treated as zero. Multi-turn trajectory prompt totals
+include repeated conversation history. Response counts follow server accounting,
+including reasoning when the server includes it in completion usage.
+
+Both prompt and response reports include count, missing count, total, min/max,
+mean, standard deviation, p50/p90/p95/p99, and histogram buckets. Task reports
+separate incorrect binary answers, continuous quality scores, grading errors,
+truncated responses, missing samples, and incomplete prompts. There is no universal
+binary pass/fail threshold for an entire task. `with_no_passes_when_complete`
+identifies completed binary tasks with zero passing samples. Truncation is counted
+both per turn and per sample/trajectory. The audit also reports judge retries,
+judge truncation, token usage, latency, and any sample-integrity/policy violations.
+Final saved headline/error/truncation counts are checked against recomputed metrics
+after the run lock is released. Pass@1 accompanies requested pass@k for binary tasks.
+
+The scan does not rerun native graders, execute candidate code, or independently
+validate judge decisions. A clean audit establishes coverage/accounting consistency,
+not semantic correctness of every grade or independence of a self-judge.
 
 Exit 0 means execution completed without grading incompleteness;
 it does NOT mean judge accuracy is certified. Exit 2 indicates grading/incomplete-result

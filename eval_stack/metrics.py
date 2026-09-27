@@ -13,6 +13,7 @@ def pass_at_k(n, c, k):
 
 
 def aggregate(rows, records, n, ks, complete_scope=False):
+    ks = sorted({1, *ks})  # Always report pass@1 alongside requested pass@k.
     def capped(r):
         return any(t.get('response', {}).get('finish_reason') == 'length' for t in r.get('turns', []))
     by_id = collections.defaultdict(dict)

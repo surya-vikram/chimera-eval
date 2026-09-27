@@ -11,6 +11,7 @@ from .judging import protocol_id
 from .metrics import aggregate
 from .monitoring import audit_records
 from .runner import settings
+from .token_budget import TokenBudget
 
 
 def regrade():
@@ -50,8 +51,10 @@ def _regrade(source,out):
     write_json(config_path,{'fingerprint':fingerprint,'config':c,'source_fingerprint':original['fingerprint'],
                           'source_run':str(source),'source_hash':source_hash,'judge_protocol':protocol_id(),
                           'target_generation_config':original['config'],'no_new_target_generations':True})
-    judge=Client(c['JUDGE_URL'],c['JUDGE_NAME'],c['JUDGE_SAMPLING'],c['JUDGE_CONCURRENCY'],
-                 timeout=c['REQUEST_TIMEOUT'],retries=c['REQUEST_RETRIES'])
+    capacity=c['JUDGE_KV_CACHE_NUM_TOKENS']
+    judge=Client(c['JUDGE_URL'],c['JUDGE_NAME'],c['JUDGE_SAMPLING'],c['MAX_PENDING'] if capacity else c['JUDGE_CONCURRENCY'],
+                 timeout=c['REQUEST_TIMEOUT'],retries=c['REQUEST_RETRIES'],
+                 token_budget=TokenBudget(capacity) if capacity else None)
     grader=Grader(judge,c['JUDGE_MAX_TOKENS'],c['JUDGE_CONTEXT'],c['CODE_IMAGE'],c['CODE_TIMEOUT'],c['CODE_CONCURRENCY'],
                   out/'judge_attempts',c['JUDGE_ATTEMPTS'],c['JUDGE_MAX_RETRY_TOKENS'])
     def work(path):

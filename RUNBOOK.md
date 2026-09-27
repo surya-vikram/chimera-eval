@@ -34,7 +34,7 @@ within configured limits and fails grading if no valid judgment is obtained.
 
 ## Interface and installation
 
-Use Python 3.12 and Docker. Build once from this repository:
+Use Python 3.12 and Docker. For the offline launcher, keep the image already loaded locally. If rebuilding or publishing a new image, build it from this repository:
 
 ```bash
 docker build -t suryavikram6/chimera-eval:0.1.1 .
@@ -60,7 +60,7 @@ docker run --rm --network host \
   -v "$PWD:/repo:ro" -v /datasets/chimera-eval:/data \
   -v /path/to/tokenizer:/tokenizer:ro \
   -e EVAL_ROOT=/repo -e DATA_DIR=/data -e PREP_TOKENIZER=/tokenizer \
-  --entrypoint bash suryavikram6/chimera-eval:0.1.1 /repo/run_eval.sh prepare
+  --entrypoint bash suryavikram6/chimera-eval:0.1.1 /repo/eval_entrypoint.sh prepare
 ```
 
 Initial preparation downloads public source data, including the approximately 11 GB HELMET
@@ -87,7 +87,7 @@ the 128-prompt validation set is not expanded to hide those shortages.
 
 ## Configure and evaluate hosted endpoints
 
-Edit `run_eval.sh`, then run it. No API keys are required.
+Edit the offline launcher configuration in `run_eval.sh` and run `bash run_eval.sh`. For direct in-container execution, use `eval_entrypoint.sh`. No API keys are required.
 
 ```bash
 docker run --rm --network host \
@@ -95,7 +95,7 @@ docker run --rm --network host \
   -v /datasets/chimera-eval-results:/results \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -e EVAL_ROOT=/repo -e DATA_DIR=/data -e OUTPUT_DIR=/results \
-  --entrypoint bash suryavikram6/chimera-eval:0.1.1 /repo/run_eval.sh
+  --entrypoint bash suryavikram6/chimera-eval:0.1.1 /repo/eval_entrypoint.sh
 ```
 
 Both model servers need `/v1/models`, `/v1/chat/completions`, and vLLM's `/tokenize` route.
@@ -136,6 +136,64 @@ Responses are graded as they finish. No all-generation barrier is used. Individu
 are saved before grading, so a failed judge request can be retried without resampling the model.
 Rerun the **unchanged** command/name to resume. A changed configuration, dataset or code hash
 requires a new run name. Exit code 2 means unresolved evaluation/infrastructure errors.
+
+## Token-budget admission for mixed domains
+
+Set two independent budgets in the configuration block in `run_eval.sh` or pass them to Docker:
+
+```bash
+export MODEL_KV_CACHE_NUM_TOKENS=262144
+export JUDGE_KV_CACHE_NUM_TOKENS=131072
+```
+
+These are illustrative capacities, not measured recommendations for your GPU.
+Zero preserves request-count scheduling for that role. A positive target budget
+replaces `MODEL_CONCURRENCY` and `LONG_CONTEXT_CONCURRENCY`; a positive judge
+budget replaces `JUDGE_CONCURRENCY`. `SHARED_ENDPOINT_CONCURRENCY` applies only
+when both roles use legacy scheduling. `MAX_PENDING` remains a worker safety
+ceiling and defaults to 128 when either token budget is enabled.
+The old single `KV_CACHE_NUM_TOKENS` setting is rejected if nonzero; replace it
+with the two role-specific settings.
+
+For every target generation, conversation turn, and judge attempt:
+
+1. Count the actual templated prompt with that endpoint's `/tokenize` route.
+2. Reserve `prompt_tokens + max_tokens`, using that request's configured output
+   ceiling. Reasoning tokens share this allowance. Domain output caps already
+   distinguish short answers from long math/code responses.
+3. Admit only when the sum of reservations fits the budget. Release on completion
+   or failure, before requesting judgment or another conversation turn. HTTP
+   retries retain the reservation; judge retries reserve their new output ceiling.
+4. Round-robin the pending jobs across domains. Within each role, admit the
+   oldest request that fits; after eight bypasses, stop backfilling past that
+   waiter until it fits. This trades some utilization for progress on long inputs.
+
+Target and judge always have separate reservations, including when they share a
+server. With both budgets enabled on one server, the maximum combined reservation
+is their **sum**; divide that server's available capacity between the two roles.
+Unused target capacity is not borrowed by the judge or vice versa. With separate
+servers, size each budget for its server. A role in legacy mode has no token bound;
+use both budgets to bound combined reservations on a shared server. This process
+cannot coordinate other evaluator processes or external clients. For example,
+a 262144 target budget admits up to eight target requests of 32768 reserved tokens
+or two of 131072, subject to the worker/server ceilings.
+
+An individual request larger than the budget becomes an explicit evaluation error;
+the evaluator never shrinks its prompt/output cap or silently exceeds the budget.
+Queue waits use `REQUEST_TIMEOUT`, separately from each HTTP attempt's timeout.
+Saved responses include `kv_admission` reservation/wait diagnostics; `metrics.json`
+includes per-role endpoint, capacity, and peak reservations for the current invocation.
+
+This is a conservative **client admission budget**, not a vLLM memory-allocation
+flag or a GPU-memory guarantee. It reserves the full output ceiling because the
+client is non-streaming. Prefix-cache sharing can reduce actual use, while block
+rounding, speculative decoding, hybrid attention layouts, other traffic, and
+requests still running after a client timeout can invalidate a literal mapping
+to physical KV occupancy. Size it from the deployed server's reported KV capacity
+with headroom, and monitor cache pressure/preemption and throughput. Keep vLLM's
+server sequence limit as its own safety bound; do not infer KV capacity from GPU
+VRAM alone. A capacity below the largest prompt-plus-output request cannot cover
+the full suite. Changing scheduler configuration requires a new run name.
 
 ## Long context
 

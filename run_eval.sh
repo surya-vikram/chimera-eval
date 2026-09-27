@@ -1,189 +1,171 @@
 #!/usr/bin/env bash
+# Offline Docker launcher. Edit this block, then: bash run_eval.sh
 set -euo pipefail
-# EDIT THIS BLOCK. Environment overrides are useful for containers/automation.
-export EVAL_ROOT="${EVAL_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)}"
-export DATA_DIR="${DATA_DIR:-$EVAL_ROOT/data}"
-export OUTPUT_DIR="${OUTPUT_DIR:-$EVAL_ROOT/outputs}"
-export RUN_NAME="${RUN_NAME:-evaluation}"
-export SPLIT="${SPLIT:-main_test}"
-export MODEL_URL="${MODEL_URL:-http://127.0.0.1:8000/v1}"
-export MODEL_NAME="${MODEL_NAME:-eval-smoke}"
-export MODEL_CONCURRENCY="${MODEL_CONCURRENCY:-4}"
-export MODEL_CONTEXT="${MODEL_CONTEXT:-8192}"
-export MODEL_TEMPERATURE="${MODEL_TEMPERATURE:-0.6}"
-export MODEL_TOP_P="${MODEL_TOP_P:-0.95}"
-export MODEL_TOP_K="${MODEL_TOP_K:--1}"
-export MODEL_REPETITION_PENALTY="${MODEL_REPETITION_PENALTY:-1.0}"
-export MODEL_MIN_P="${MODEL_MIN_P:-0.0}"
-export MODEL_PRESENCE_PENALTY="${MODEL_PRESENCE_PENALTY:-0.0}"
-export MODEL_FREQUENCY_PENALTY="${MODEL_FREQUENCY_PENALTY:-0.0}"
-export MODEL_CHAT_TEMPLATE_KWARGS="${MODEL_CHAT_TEMPLATE_KWARGS:-}"
-export MODEL_STOP_JSON="${MODEL_STOP_JSON:-[]}"
-export JUDGE_URL="${JUDGE_URL:-$MODEL_URL}"
-export JUDGE_NAME="${JUDGE_NAME:-$MODEL_NAME}"
-export JUDGE_CONCURRENCY="${JUDGE_CONCURRENCY:-2}"
-export JUDGE_CONTEXT="${JUDGE_CONTEXT:-32768}"
-export JUDGE_MAX_TOKENS="${JUDGE_MAX_TOKENS:-8192}"
-export JUDGE_MAX_RETRY_TOKENS="${JUDGE_MAX_RETRY_TOKENS:-16384}"
-export JUDGE_ATTEMPTS="${JUDGE_ATTEMPTS:-3}"
-export JUDGE_TEMPERATURE="${JUDGE_TEMPERATURE:-0.0}"
-export JUDGE_TOP_P="${JUDGE_TOP_P:-1.0}"
-export JUDGE_TOP_K="${JUDGE_TOP_K:--1}"
-export JUDGE_REPETITION_PENALTY="${JUDGE_REPETITION_PENALTY:-1.0}"
-export JUDGE_MIN_P="${JUDGE_MIN_P:-0.0}"
-export JUDGE_PRESENCE_PENALTY="${JUDGE_PRESENCE_PENALTY:-0.0}"
-export JUDGE_FREQUENCY_PENALTY="${JUDGE_FREQUENCY_PENALTY:-0.0}"
-export JUDGE_STOP_JSON="${JUDGE_STOP_JSON:-[]}"
-export JUDGE_CHAT_TEMPLATE_KWARGS="${JUDGE_CHAT_TEMPLATE_KWARGS:-}"
-export SHARED_ENDPOINT_CONCURRENCY="${SHARED_ENDPOINT_CONCURRENCY:-4}"
-export N_SAMPLES="${N_SAMPLES:-2}"
-export PASS_K="${PASS_K:-2}"
-export SEED="${SEED:-42}"
-export REQUEST_TIMEOUT="${REQUEST_TIMEOUT:-180}"
-export REQUEST_RETRIES="${REQUEST_RETRIES:-2}"
-export MAX_PENDING="${MAX_PENDING:-16}"
-export LONG_CONTEXT_CONCURRENCY="${LONG_CONTEXT_CONCURRENCY:-8}" # Generation requests for >=16K cells.
-export TEST_MAX_ITEMS="${TEST_MAX_ITEMS:-4000}"
-export LIMIT_PER_TASK="${LIMIT_PER_TASK:-0}" # Nonzero => diagnostic, never full benchmark.
-export TASKS="${TASKS:-}"                  # Comma-separated task IDs; blank = all.
-export MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-0}" # 0 uses per-record caps; overrides are recorded.
-export DOMAIN_MAX_TOKENS_JSON="${DOMAIN_MAX_TOKENS_JSON:-}"
-export TASK_MAX_TOKENS_JSON="${TASK_MAX_TOKENS_JSON:-}" # e.g. {"gsm8k":8192,"math500":32768}
-if [[ -z "$TASK_MAX_TOKENS_JSON" ]]; then
-  export TASK_MAX_TOKENS_JSON='{"gsm8k":8192,"gsm8k_train":8192,"math500":32768,"nemotron_math":32768,"triviaqa":4096,"mcqa":4096,"arc":4096,"mmlu_pro":8192,"openqa":8192,"science":8192,"hotpot":4096,"hotpot_train":4096,"cascade_chat":8192,"cascade_lists":8192,"cascade_plans":16384,"biggen":16384,"reasoning_gym":16384,"calendar":16384,"apps":16384,"humanevalplus":16384}'
-fi
-# Set TASK_MAX_TOKENS_JSON='{}' to use only domain/frozen-row budgets.
-# Budget precedence: MAX_NEW_TOKENS > task override > domain override > frozen record.
-# Output caps include reasoning tokens where the server accounts for them.
-# Pilot larger caps (e.g. {"math":32768}) before freezing a comparison protocol.
-# Fixed-budget evaluation: finish_reason=length scores zero and is reported.
-# Compare models at the same task caps; never silently shrink prompts.
-export CODE_IMAGE="${CODE_IMAGE:-suryavikram6/chimera-eval:0.1.1}"
-export CODE_TIMEOUT="${CODE_TIMEOUT:-15}"
-export CODE_CONCURRENCY="${CODE_CONCURRENCY:-2}"
-export PREP_TOKENIZER="${PREP_TOKENIZER:-}" # Local tokenizer path for frozen preparation admission.
-export LONG_CONTEXT_BUCKETS="${LONG_CONTEXT_BUCKETS:-4096,8192,16384,32768,65536,131072}"
-export PREP_LONG_CONTEXT="${PREP_LONG_CONTEXT:-1}"
-export LONG_RESPONSE_RESERVE="${LONG_RESPONSE_RESERVE:-8192}"
-export REGRADES_SOURCE="${REGRADES_SOURCE:-}" # Existing run directory; regrade never generates target responses.
-export REGRADES_IDS="${REGRADES_IDS:-}" # Optional comma-separated IDs for a focused regrade.
-export SOURCE_DATA_DIR="${SOURCE_DATA_DIR:-}" # revise-data source; DATA_DIR must be a new destination.
-# Comma-separated token windows, e.g. 16384,32768; blank evaluates all fitting MODEL_CONTEXT.
-# This selects long-context tasks only; regular-domain tasks remain enabled unless TASKS filters them.
-export EVAL_CONTEXT_BUCKETS="${EVAL_CONTEXT_BUCKETS:-}"
-export PYTHONPATH="$EVAL_ROOT${PYTHONPATH:+:$PYTHONPATH}"
-PYTHON_BIN="${PYTHON_BIN:-python3}"
-# Main-test task counts: edit these, then prepare a NEW data directory to enlarge a frozen split.
-# Evaluation can reduce these counts on an existing split; it cannot access unreserved rows.
-# Pool comments are observed source/reserved counts, not guarantees after runtime context admission.
-# Revised frozen defaults total 3,982. Increase allocations only within the 4,000 cap.
-declare -A TASK_SAMPLES=(
-  [gsm8k]=400 # Source pool: 1,319; frozen target: 400.
-  [math500]=200 # Source pool: 500; frozen target: 200.
-  [arc]=160 # Source pool: 1,172; frozen target: 160.
-  [mmlu_pro]=280 # Source pool: 12,000; frozen target: 280.
-  [triviaqa]=200 # Source pool: 17,944; frozen target: 200.
-  [hotpot]=400 # Source pool: 7,396; frozen target: 400.
-  [biggen]=390 # Source pool: 406; revised admitted test: 390.
-  [ifeval]=200 # Source pool: 541; frozen target: 200.
-  [ifbench]=200 # Source pool: 300; frozen target: 200.
-  [multi_if]=200 # Source pool: 896; frozen target: 200.
-  [multichallenge]=200 # Reserved pool: 262 after screening; frozen target: 200.
-  [structeval]=194 # Source pool: 950; revised admitted test: 194.
-  [humanevalplus]=163 # Source: 164; admitted: 163. HumanEval/32 quarantined after reference/oracle audit.
-  [bbh_boolean_expressions]=30 # Source pool: 250; frozen target: 30.
-  [bbh_date_understanding]=30 # Source pool: 250; frozen target: 30.
-  [bbh_disambiguation_qa]=30 # Source pool: 250; frozen target: 30.
-  [bbh_formal_fallacies]=30 # Source pool: 250; frozen target: 30.
-  [bbh_logical_deduction_five_objects]=30 # Source pool: 250; frozen target: 30.
-  [bbh_navigate]=30 # Source pool: 250; frozen target: 30.
-  [bbh_object_counting]=30 # Source pool: 250; frozen target: 30.
-  [bbh_penguins_in_a_table]=30 # Source pool: 146; frozen target: 30.
-  [bbh_reasoning_about_colored_objects]=30 # Source pool: 250; frozen target: 30.
-  [bbh_temporal_sequences]=30 # Source pool: 250; frozen target: 30.
-  [bbh_tracking_shuffled_objects_five_objects]=30 # Source pool: 250; frozen target: 30.
-  [bbh_web_of_lies]=30 # Source pool: 250; frozen target: 30.
-  # 4K: evaluation only; 40-row admitted RULER pools (256 published rows scanned).
-  [long_4096_niah_single_1]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_4096_niah_single_2]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_4096_niah_single_3]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_4096_niah_multikey_1]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_4096_niah_multivalue]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_4096_niah_multiquery]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_4096_vt]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_4096_cwe]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_4096_fwe]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_4096_qa_1]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_4096_rag]=16 # Reserved pool: 36; frozen target: 16; context admission still applies.
-  [long_4096_icl]=17 # Reserved pool: 51; frozen target: 17; context admission still applies.
-  # 8K: evaluation only; 40-row admitted RULER pools (256 published rows scanned).
-  [long_8192_niah_single_1]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_8192_niah_single_2]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_8192_niah_single_3]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_8192_niah_multikey_1]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_8192_niah_multivalue]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_8192_niah_multiquery]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_8192_vt]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_8192_cwe]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_8192_fwe]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_8192_qa_1]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_8192_rag]=16 # Reserved pool: 42; frozen target: 16; context admission still applies.
-  [long_8192_icl]=17 # Reserved pool: 51; frozen target: 17; context admission still applies.
-  # 16K: evaluation only; 40-row admitted RULER pools (256 published rows scanned).
-  [long_16384_niah_single_1]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_16384_niah_single_2]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_16384_niah_single_3]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_16384_niah_multikey_1]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_16384_niah_multivalue]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_16384_niah_multiquery]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_16384_vt]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_16384_cwe]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_16384_fwe]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_16384_qa_1]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_16384_rag]=16 # Reserved pool: 43; frozen target: 16; context admission still applies.
-  [long_16384_icl]=17 # Reserved pool: 51; frozen target: 17; context admission still applies.
-  # 32K: evaluation only; 40-row admitted RULER pools (256 published rows scanned).
-  [long_32768_niah_single_1]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_32768_niah_single_2]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_32768_niah_single_3]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_32768_niah_multikey_1]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_32768_niah_multivalue]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_32768_niah_multiquery]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_32768_vt]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_32768_cwe]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_32768_fwe]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_32768_qa_1]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_32768_rag]=16 # Reserved pool: 43; frozen target: 16; context admission still applies.
-  [long_32768_icl]=17 # Reserved pool: 51; frozen target: 17; context admission still applies.
-  # 64K: evaluation only; 40-row admitted RULER pools (256 published rows scanned).
-  [long_65536_niah_single_1]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_65536_niah_single_2]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_65536_niah_single_3]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_65536_niah_multikey_1]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_65536_niah_multivalue]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_65536_niah_multiquery]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_65536_vt]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_65536_cwe]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_65536_fwe]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_65536_qa_1]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_65536_rag]=16 # Reserved pool: 43; frozen target: 16; context admission still applies.
-  [long_65536_icl]=16 # Reserved pool: 48; frozen target: 16; context admission still applies.
-  # 128K: evaluation only; observed pools below (256 published rows scanned).
-  [long_131072_niah_single_1]=4 # Reserved pool: 78; frozen target: 4; context admission still applies.
-  [long_131072_niah_single_2]=4 # Reserved pool: 78; frozen target: 4; context admission still applies.
-  [long_131072_niah_single_3]=4 # Reserved pool: 78; frozen target: 4; context admission still applies.
-  [long_131072_niah_multikey_1]=4 # Reserved pool: 78; frozen target: 4; context admission still applies.
-  [long_131072_niah_multivalue]=4 # Reserved pool: 78; frozen target: 4; context admission still applies.
-  [long_131072_niah_multiquery]=4 # Reserved pool: 78; frozen target: 4; context admission still applies.
-  [long_131072_vt]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_131072_cwe]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_131072_fwe]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_131072_qa_1]=4 # Reserved pool: 40; frozen target: 4; context admission still applies.
-  [long_131072_rag]=15 # Reserved pool: 43; revised test: 15 after one context-overflow exclusion.
-  [long_131072_icl]=16 # Reserved pool: 48; frozen target: 16; context admission still applies.
+REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+
+# ======================= EDIT CONFIGURATION HERE =======================
+IMAGE="${IMAGE:-suryavikram6/chimera-eval:0.1.1}"  # Must already be loaded.
+CODE_IMAGE="${CODE_IMAGE:-$IMAGE}"                # Local Python grading image.
+DATA_PATH="${DATA_PATH:-$REPO_ROOT/prepared-data}" # manifest.json + splits/*.jsonl
+OUTPUT_PATH="${OUTPUT_PATH:-$REPO_ROOT/outputs}"
+RUN_NAME="${RUN_NAME:-quick-all-$(date +%Y%m%d-%H%M%S)}"
+# Use the same explicit RUN_NAME to resume unchanged code/data/model/settings.
+DOCKER_SOCKET="${DOCKER_SOCKET:-/var/run/docker.sock}"
+
+declare -A CONFIG=(
+  # Models are already hosted. Use reachable internal URLs ending in /v1.
+  [MODEL_URL]="http://127.0.0.1:8000/v1"
+  [MODEL_NAME]="glimmer-eval"
+  [MODEL_CONTEXT]=131072
+  [JUDGE_URL]="http://127.0.0.1:8000/v1"
+  [JUDGE_NAME]="glimmer-eval"
+  [JUDGE_CONTEXT]=131072
+
+  # Independent token budgets. On one server, divide its capacity between roles.
+  [MODEL_KV_CACHE_NUM_TOKENS]=262144
+  [JUDGE_KV_CACHE_NUM_TOKENS]=131072
+  [MAX_PENDING]=128
+
+  # Quick all-domain default: one prompt per task, one response per prompt.
+  # Full inventory: LIMIT_PER_TASK=0. For pass@2: N_SAMPLES=2 and PASS_K="1,2".
+  [SPLIT]="main_test"
+  [TASKS]=""                          # Blank = all; e.g. "gsm8k,math500,humanevalplus"
+  [LIMIT_PER_TASK]=1
+  [TASK_SAMPLE_COUNTS_JSON]='{}'        # All frozen counts; e.g. {"gsm8k":50}
+  [N_SAMPLES]=1
+  [PASS_K]="1"
+  [SEED]=42
+  [EVAL_CONTEXT_BUCKETS]=""            # Blank = all fitting; e.g. "4096,8192,16384"
+
+  # Sampling and model-specific reasoning options. Use '{}' for other templates.
+  [MODEL_TEMPERATURE]=0.6
+  [MODEL_TOP_P]=0.95
+  [MODEL_TOP_K]=-1
+  [MODEL_REPETITION_PENALTY]=1.0
+  [MODEL_MIN_P]=0.0
+  [MODEL_PRESENCE_PENALTY]=0.0
+  [MODEL_FREQUENCY_PENALTY]=0.0
+  [MODEL_CHAT_TEMPLATE_KWARGS]='{"reasoning_strength":"high"}'
+  [MODEL_STOP_JSON]='[]'
+  [JUDGE_TEMPERATURE]=0.0
+  [JUDGE_TOP_P]=1.0
+  [JUDGE_TOP_K]=-1
+  [JUDGE_REPETITION_PENALTY]=1.0
+  [JUDGE_MIN_P]=0.0
+  [JUDGE_PRESENCE_PENALTY]=0.0
+  [JUDGE_FREQUENCY_PENALTY]=0.0
+  [JUDGE_CHAT_TEMPLATE_KWARGS]='{"reasoning_strength":"high"}'
+  [JUDGE_STOP_JSON]='[]'
+
+  # Response ceilings: global > task > domain > frozen row. Never truncate inputs.
+  [MAX_NEW_TOKENS]=0
+  [TASK_MAX_TOKENS_JSON]='{"gsm8k":8192,"math500":32768,"arc":4096,"mmlu_pro":8192,"triviaqa":4096,"hotpot":4096,"biggen":16384,"humanevalplus":16384}'
+  [DOMAIN_MAX_TOKENS_JSON]='{}'
+  [JUDGE_MAX_TOKENS]=8192
+  [JUDGE_MAX_RETRY_TOKENS]=16384
+  [JUDGE_ATTEMPTS]=3
+  [REQUEST_TIMEOUT]=1800
+  [REQUEST_RETRIES]=2
+  [CODE_TIMEOUT]=15
+  [CODE_CONCURRENCY]=2
+
+  # Legacy limits, used only when the corresponding token budget is zero.
+  [MODEL_CONCURRENCY]=16
+  [JUDGE_CONCURRENCY]=8
+  [SHARED_ENDPOINT_CONCURRENCY]=24
+  [LONG_CONTEXT_CONCURRENCY]=8
 )
-sample_args=()
-for task in "${!TASK_SAMPLES[@]}"; do sample_args+=("$task=${TASK_SAMPLES[$task]}"); done
-export TASK_SAMPLE_COUNTS_JSON="${TASK_SAMPLE_COUNTS_JSON:-$("$PYTHON_BIN" -c 'import json,sys; print(json.dumps({k:int(v) for k,v in (s.split("=",1) for s in sys.argv[1:])}))' "${sample_args[@]}")}"
-if [[ $# -eq 0 ]]; then set -- evaluate; fi
-exec "$PYTHON_BIN" -m eval_stack.cli "$@"
+# ===================== END EDITABLE CONFIGURATION =====================
+# Explicit environment overrides are also accepted for every CONFIG field.
+for key in "${!CONFIG[@]}"; do
+  if [[ -v "$key" ]]; then CONFIG[$key]="${!key}"; fi
+done
+
+die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+DRY_RUN=0
+case "${1:-}" in
+  '') ;;
+  --dry-run) DRY_RUN=1 ;;
+  *) die 'Usage: bash run_eval.sh [--dry-run]' ;;
+esac
+[[ $# -le 1 ]] || die 'Usage: bash run_eval.sh [--dry-run]'
+[[ "$RUN_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'RUN_NAME must contain only letters, digits, dots, underscores, or hyphens, starting with a letter/digit.'
+[[ "${CONFIG[SPLIT]}" =~ ^(main_test|rl_val|rl_train)$ ]] || die 'SPLIT must be main_test, rl_val, or rl_train.'
+for role in MODEL JUDGE; do
+  key="${role}_URL"
+  [[ "${CONFIG[$key]}" =~ ^https?://.+/v1/?$ ]] || die "$key must be an HTTP(S) base URL ending in /v1."
+done
+command -v docker >/dev/null || die 'Docker is not installed. Install it before transferring this offline package.'
+docker info >/dev/null 2>&1 || die 'Cannot access the Docker daemon. Check that Docker is running and your account has access.'
+[[ -S "$DOCKER_SOCKET" ]] || die "Docker socket missing: $DOCKER_SOCKET"
+for local_image in "$IMAGE" "$CODE_IMAGE"; do
+  docker image inspect "$local_image" >/dev/null 2>&1 || die "Required local image is missing: $local_image. Load the transferred image with docker load; this script never pulls images."
+done
+[[ -f "$REPO_ROOT/eval_entrypoint.sh" && -d "$REPO_ROOT/eval_stack" ]] || die 'Keep run_eval.sh in the chimera-eval repository.'
+[[ -f "$DATA_PATH/manifest.json" ]] || die "Prepared manifest missing: $DATA_PATH/manifest.json. Transfer the matching prepared dataset first."
+[[ -f "$DATA_PATH/splits/${CONFIG[SPLIT]}.jsonl" ]] || die "Prepared split missing: $DATA_PATH/splits/${CONFIG[SPLIT]}.jsonl"
+DATA_PATH="$(cd -- "$DATA_PATH" && pwd -P)"
+OUTPUT_PATH="$(realpath -m -- "$OUTPUT_PATH")"
+LAUNCH_PATH="$OUTPUT_PATH/.launchers/$RUN_NAME"
+CODE_PATH="$LAUNCH_PATH/code"
+CONTAINER_NAME="chimera-eval-$RUN_NAME-$$"
+LOG_FILE="$OUTPUT_PATH/$RUN_NAME.log"
+for mount_path in "$DATA_PATH" "$OUTPUT_PATH" "$CODE_PATH" "$DOCKER_SOCKET"; do
+  [[ "$mount_path" != *:* ]] || die 'Mount paths containing colons are unsupported.'
+done
+
+args=(run --rm --pull=never --init --network host --workdir /repo
+  --name "$CONTAINER_NAME"
+  -v "$CODE_PATH:/repo:ro" -v "$DATA_PATH:/data:ro" -v "$OUTPUT_PATH:/results"
+  -v "$DOCKER_SOCKET:/var/run/docker.sock"
+  -e EVAL_ROOT=/repo -e DATA_DIR=/data -e OUTPUT_DIR=/results -e PYTHON_BIN=python3
+  -e "RUN_NAME=$RUN_NAME" -e "CODE_IMAGE=$CODE_IMAGE"
+  -e HF_HUB_OFFLINE=1 -e HF_DATASETS_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1)
+for key in "${!CONFIG[@]}"; do args+=(-e "$key=${CONFIG[$key]}"); done
+args+=(--entrypoint bash "$IMAGE" /repo/eval_entrypoint.sh)
+if (( DRY_RUN )); then
+  printf 'Offline launch preview (no files created and no container started):\n'
+  printf 'docker '; printf '%q ' "${args[@]}"; printf '\n'
+  exit 0
+fi
+
+mkdir -p -- "$OUTPUT_PATH" "$LAUNCH_PATH"
+# Freeze the evaluator for this run; edits to the repo cannot alter an active run
+# or an unchanged resume. To use changed code, choose a new RUN_NAME.
+if [[ ! -d "$CODE_PATH" ]]; then
+  STAGING_PATH="$(mktemp -d "$LAUNCH_PATH/code.XXXXXX")"
+  cp -a -- "$REPO_ROOT/eval_stack" "$REPO_ROOT/eval_entrypoint.sh" "$STAGING_PATH/"
+  if [[ -f "$REPO_ROOT/source_revisions.json" ]]; then
+    cp -- "$REPO_ROOT/source_revisions.json" "$STAGING_PATH/"
+  fi
+  mv -T -- "$STAGING_PATH" "$CODE_PATH"
+fi
+[[ -f "$CODE_PATH/eval_entrypoint.sh" && -d "$CODE_PATH/eval_stack" ]] || die "Incomplete code snapshot: $CODE_PATH. Choose a new RUN_NAME."
+
+CONTROL_PATH="$(mktemp -d "$LAUNCH_PATH/control.XXXXXX")"
+CID_FILE="$CONTROL_PATH/container.id"
+cleanup() {
+  # Only stop a container whose ID this invocation actually created.
+  if [[ -f "$CID_FILE" ]]; then
+    cid="$(cat -- "$CID_FILE")"
+    if [[ "$cid" =~ ^[a-f0-9]{64}$ ]]; then
+      docker stop --time 10 "$cid" >/dev/null 2>&1 || true
+    fi
+    rm -f -- "$CID_FILE"
+  fi
+  rmdir -- "$CONTROL_PATH" 2>/dev/null || true
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+args=("${args[@]:0:1}" --cidfile "$CID_FILE" "${args[@]:1}")
+printf 'Run: %s\nResults: %s/%s\nLog: %s\n' "$RUN_NAME" "$OUTPUT_PATH" "$RUN_NAME" "$LOG_FILE" | tee -a "$LOG_FILE"
+set +e
+docker "${args[@]}" 2>&1 | tee -a "$LOG_FILE"
+statuses=("${PIPESTATUS[@]}")
+set -e
+status="${statuses[0]}"
+if (( status == 0 && statuses[1] != 0 )); then status="${statuses[1]}"; fi
+printf 'Exit code: %s\nResults: %s/%s/\nAudit: %s/%s/audit/report.md\n' \
+  "$status" "$OUTPUT_PATH" "$RUN_NAME" "$OUTPUT_PATH" "$RUN_NAME"
+exit "$status"

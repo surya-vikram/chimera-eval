@@ -11,5 +11,5 @@ RUN pip install --no-cache-dir --no-deps -r requirements.lock
 RUN python -c "from ifbench import instructions_registry; import nltk; nltk.download('punkt_tab'); nltk.download('averaged_perceptron_tagger_eng')"
 COPY eval_stack ./eval_stack
 COPY source_revisions.json ./source_revisions.json
-COPY run_eval.sh ./run_eval.sh
-ENTRYPOINT ["bash", "/opt/chimera-eval/run_eval.sh"]
+COPY eval_entrypoint.sh ./eval_entrypoint.sh
+ENTRYPOINT ["bash", "/opt/chimera-eval/eval_entrypoint.sh"]

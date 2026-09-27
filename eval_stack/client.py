@@ -1,5 +1,6 @@
 """Bounded stdlib HTTP client. No SDK-shaped extra_body on the wire."""
 import json
+from contextlib import nullcontext
 import threading
 import time
 import urllib.error
@@ -11,12 +12,13 @@ class EndpointError(RuntimeError):
 
 
 class Client:
-    def __init__(self, url, model, sampling, concurrency=4, shared=None, timeout=180, retries=2):
+    def __init__(self, url, model, sampling, concurrency=4, shared=None, timeout=180, retries=2, token_budget=None):
         self.url, self.model, self.sampling = url.rstrip("/"), model, sampling
         self.slot = threading.BoundedSemaphore(concurrency)
         self.shared = shared or threading.BoundedSemaphore(concurrency)
         self.timeout, self.retries = timeout, retries
         self.calls = 0
+        self.token_budget = token_budget
 
     def request(self, route, payload=None):
         url = (self.url[:-3] if self.url.endswith("/v1") and route == "/tokenize" else self.url) + route
@@ -57,7 +59,12 @@ class Client:
         if response_format:
             payload["response_format"] = response_format
         start = time.monotonic()
-        result = self.request("/chat/completions", payload)
+        reservation = (self.token_budget.reserve(self.token_count(messages) + max_tokens, self.timeout)
+                       if self.token_budget else nullcontext(None))
+        # Tokenization never reserves KV capacity. Hold reservations across
+        # transport retries; release before the next turn or judge request.
+        with reservation as admission:
+            result = self.request("/chat/completions", payload)
         if not result.get("choices"):
             raise EndpointError("Missing choices")
         choice = result["choices"][0]
@@ -66,4 +73,5 @@ class Client:
                 "finish_reason": choice.get("finish_reason"), "usage": result.get("usage", {}),
                 "latency": time.monotonic() - start, "request": payload,
                 "raw_response": result,
+                "kv_admission": admission,
                 "server_model": result.get("model"), "response_id": result.get("id")}

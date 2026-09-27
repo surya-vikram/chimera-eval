@@ -10,9 +10,20 @@ Current image: `suryavikram6/chimera-eval:0.1.1`. Use dataset v3; see
 Endpoint-only evaluation and preparation of three family-disjoint partitions: `rl_train`,
 `rl_val`, and `main_test`. No Slime training code lives here.
 
-Edit **`run_eval.sh`**. It is the single configuration entrypoint: model/judge endpoints,
-concurrency, sampling (including repetition penalty), context budgets, N/pass@k, and
-one sample-count field per main-evaluation task. See [RUNBOOK.md](RUNBOOK.md).
+For a one-command offline Docker launch, edit the configuration block in
+**[`run_eval.sh`](run_eval.sh)**, then run `bash run_eval.sh`. It checks local images/data,
+starts the evaluator, streams and saves progress, and preserves results and a code
+snapshot. It never pulls images or downloads data. Models must already be hosted.
+Default: one prompt per task across all domains; set `LIMIT_PER_TASK=0` for the full
+inventory. See [AIRGAPPED_RUN.md](AIRGAPPED_RUN.md).
+
+`eval_entrypoint.sh` is the lower-level entrypoint used inside Docker or for direct Python runs.
+
+For token-budget admission instead of request-count tuning, set
+`MODEL_KV_CACHE_NUM_TOKENS` and `JUDGE_KV_CACHE_NUM_TOKENS` in `run_eval.sh`
+(0 keeps legacy limits for that role). The two budgets are independent, even when
+target and judge use the same endpoint. See the token-budget section
+in [RUNBOOK.md](RUNBOOK.md) for sizing and mixed-domain scheduling.
 
 The orchestration uses Python's standard library. Native task graders and dataset preparation
 use pinned dependencies in a separate CPU evaluation image. Models run in your existing vLLM servers.

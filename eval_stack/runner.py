@@ -13,6 +13,7 @@ from .client import Client
 from .common import canonical, digest, env, read_jsonl, validate_record, write_json
 from .graders import Grader, result
 from .metrics import aggregate
+from .token_budget import TokenBudget, interleave_domains
 
 
 def context_limit(row, model_context):
@@ -24,12 +25,25 @@ def context_limit(row, model_context):
     return min(model_context, row.get('context_window', model_context))
 
 
+def response_budget(row, config):
+    # Explicit task/domain caps must not eagerly read an absent row default.
+    cap = (config['MAX_NEW_TOKENS'] or config['TASK_MAX_TOKENS'].get(row['task'])
+           or config['DOMAIN_MAX_TOKENS'].get(row['domain']) or row.get('max_new_tokens'))
+    if type(cap) is not int or cap < 1:
+        raise ValueError('No positive response budget for task: ' + row['task'])
+    return cap
+
+
 def settings():
+    if env('KV_CACHE_NUM_TOKENS', 0, int):
+        raise ValueError('Use MODEL_KV_CACHE_NUM_TOKENS and JUDGE_KV_CACHE_NUM_TOKENS instead of KV_CACHE_NUM_TOKENS')
+    token_mode = any(env(role + '_KV_CACHE_NUM_TOKENS', 0, int) > 0 for role in ('MODEL', 'JUDGE'))
     ints = {'MODEL_CONCURRENCY': 4, 'MODEL_CONTEXT': 8192, 'JUDGE_CONCURRENCY': 2,
             'JUDGE_CONTEXT': 32768, 'JUDGE_MAX_TOKENS': 8192, 'SHARED_ENDPOINT_CONCURRENCY': 4,
             'JUDGE_MAX_RETRY_TOKENS': 16384, 'JUDGE_ATTEMPTS': 3,
             'N_SAMPLES': 2, 'SEED': 42, 'REQUEST_TIMEOUT': 180, 'REQUEST_RETRIES': 2,
-            'MAX_PENDING': 16, 'LIMIT_PER_TASK': 0, 'MAX_NEW_TOKENS': 0,
+            'MAX_PENDING': 128 if token_mode else 16,
+            'MODEL_KV_CACHE_NUM_TOKENS': 0, 'JUDGE_KV_CACHE_NUM_TOKENS': 0, 'LIMIT_PER_TASK': 0, 'MAX_NEW_TOKENS': 0,
             'CODE_TIMEOUT': 15, 'CODE_CONCURRENCY': 2, 'LONG_CONTEXT_CONCURRENCY': 8}
     c = {k: env(k, v, int) for k, v in ints.items()}
     for role in ('MODEL', 'JUDGE'):
@@ -60,6 +74,9 @@ def settings():
             raise ValueError(name + ' must map names to positive integer token budgets')
     if c['MAX_NEW_TOKENS'] < 0:
         raise ValueError('MAX_NEW_TOKENS must be nonnegative')
+    for role in ('MODEL', 'JUDGE'):
+        if c[role + '_KV_CACHE_NUM_TOKENS'] < 0:
+            raise ValueError(role + '_KV_CACHE_NUM_TOKENS must be nonnegative')
     if c['N_SAMPLES'] < 1 or any(k < 1 or k > c['N_SAMPLES'] for k in c['PASS_K']):
         raise ValueError('PASS_K must be between 1 and N_SAMPLES')
     if any(c[k] < 1 for k in ('MODEL_CONCURRENCY', 'JUDGE_CONCURRENCY', 'MAX_PENDING', 'SHARED_ENDPOINT_CONCURRENCY', 'LONG_CONTEXT_CONCURRENCY')):
@@ -126,12 +143,18 @@ def _evaluate():
         raise ValueError('Run configuration/data/code changed. Choose a new RUN_NAME; refusing unsafe resume.')
     write_json(config_path, {'fingerprint': fingerprint, 'config': c, 'source_hash': source_hash,
                              'selected_rows': len(rows), 'data_manifest': manifest})
-    shared = threading.BoundedSemaphore(c['SHARED_ENDPOINT_CONCURRENCY'])
+    token_mode = any(c[role + '_KV_CACHE_NUM_TOKENS'] > 0 for role in ('MODEL', 'JUDGE'))
+    shared = threading.BoundedSemaphore(c['MAX_PENDING'] if token_mode else c['SHARED_ENDPOINT_CONCURRENCY'])
+    budgets = {}
     long_slots = threading.BoundedSemaphore(c['LONG_CONTEXT_CONCURRENCY'])
     def client(role):
-        return Client(c[role+'_URL'], c[role+'_NAME'], c[role+'_SAMPLING'], c[role+'_CONCURRENCY'],
+        capacity = c[role + '_KV_CACHE_NUM_TOKENS']
+        if capacity:
+            budgets[role] = TokenBudget(capacity)
+        return Client(c[role+'_URL'], c[role+'_NAME'], c[role+'_SAMPLING'],
+                      c['MAX_PENDING'] if capacity else c[role+'_CONCURRENCY'],
                       shared=shared if c['MODEL_URL'].rstrip('/') == c['JUDGE_URL'].rstrip('/') else None,
-                      timeout=c['REQUEST_TIMEOUT'], retries=c['REQUEST_RETRIES'])
+                      timeout=c['REQUEST_TIMEOUT'], retries=c['REQUEST_RETRIES'], token_budget=budgets.get(role))
     model, judge = client('MODEL'), client('JUDGE')
     for endpoint in (model, judge):
         models = endpoint.request('/models')
@@ -169,7 +192,7 @@ def _evaluate():
                         messages.append(turn['message'])
                     current['verification'] = {'ids': turn['ids'], 'kwargs': turn['kwargs']}
                 current['messages'] = copy.deepcopy(messages)
-                cap = c['MAX_NEW_TOKENS'] or c['TASK_MAX_TOKENS'].get(row['task'], c['DOMAIN_MAX_TOKENS'].get(row['domain'], row['max_new_tokens']))
+                cap = response_budget(row, c)
                 # Do not silently truncate prompts or reduce the requested completion budget.
                 context = context_limit(row, c['MODEL_CONTEXT'])
                 if model.token_count(messages) + cap > context:
@@ -180,7 +203,7 @@ def _evaluate():
                     seed = (c['SEED'] + int(row['id'][:8], 16) + sample * 1009 + turn_index * 97) % (2**31)
                     # Long prefills share a separate bound so short-task concurrency
                     # can stay high without flooding KV cache with 128K requests.
-                    with long_slots if row.get('length_bucket', 0) >= 16384 else contextlib.nullcontext():
+                    with long_slots if not c['MODEL_KV_CACHE_NUM_TOKENS'] and row.get('length_bucket', 0) >= 16384 else contextlib.nullcontext():
                         response = model.complete(messages, cap, seed=seed)
                     item = {'response': response}
                     record['turns'].append(item)
@@ -205,7 +228,7 @@ def _evaluate():
 
     # Each worker grades its completion immediately. No generation-wide barrier.
     with futures.ThreadPoolExecutor(max_workers=c['MAX_PENDING']) as pool:
-        iterator = iter(jobs)
+        iterator = interleave_domains(jobs) if token_mode else iter(jobs)
         pending = {pool.submit(work, job) for job in [next(iterator, None) for _ in range(c['MAX_PENDING'])] if job is not None}
         while pending:
             done, pending = futures.wait(pending, return_when=futures.FIRST_COMPLETED)
@@ -220,6 +243,9 @@ def _evaluate():
     complete = (not subset_by_count and not skipped and not c['TASKS'] and not c['LIMIT_PER_TASK'] and c['SPLIT'] == 'main_test'
                 and manifest.get('main_test_inventory_complete', manifest.get('complete_inventory', False)))
     report = aggregate(rows, records, c['N_SAMPLES'], c['PASS_K'], complete)
+    report['kv_token_budgets'] = {role: {'endpoint': c[role + '_URL'].rstrip('/'),
+                                               'capacity': b.capacity, 'peak_reserved_tokens': b.peak}
+                                  for role, b in budgets.items()}
     report.update(fingerprint=fingerprint, target=c['MODEL_NAME'], judge=c['JUDGE_NAME'],
                   judge_validation='not_certified_by_runner; requires independent calibration',
                   untested_length_buckets=sorted({r['length_bucket'] for r in skipped}),
@@ -237,5 +263,7 @@ def _evaluate():
     write_json(out / 'metrics.json', report)
     from .monitoring import audit_records
     write_json(out / 'reliability.json', audit_records(records, out/'judge_attempts'))
+    from .run_audit import audit_run
+    audit_run(out, root, running=False)
     print(json.dumps(report, indent=2), flush=True)
     return report

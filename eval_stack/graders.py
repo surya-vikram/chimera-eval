@@ -284,7 +284,7 @@ class Grader:
         code_blocks = re.findall(r"```(?:python|py)?\s*\n(.*?)```", text, re.S)
         code = code_blocks[-1] if code_blocks else text
         name = 'chimera-code-' + uuid.uuid4().hex
-        command = ["docker", "run", "--name", name, "--rm", "-i", "--network", "none", "--read-only",
+        command = ["docker", "run", "--pull=never", "--name", name, "--rm", "-i", "--network", "none", "--read-only",
                    "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "64",
                    "--memory", "768m", "--cpus", "1", "--user", "65534:65534",
                    "--tmpfs", "/tmp:rw,nosuid,size=128m", "--entrypoint", "python",

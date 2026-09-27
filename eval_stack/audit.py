@@ -7,7 +7,7 @@ from .common import digest, read_jsonl, write_json, write_jsonl
 from .prepare import family_keys
 
 
-def audit(root, sanitize_pool=False):
+def audit(root, sanitize_pool=False, output_path=None):
     root = Path(root)
     manifest = json.loads((root/'manifest.json').read_text())
     keys, ids, report = {}, {}, {'splits':{}, 'errors':[]}
@@ -44,7 +44,7 @@ def audit(root, sanitize_pool=False):
     if any(report['overlaps'].values()): report['errors'].append('Cross-split family overlap')
     report['passed'] = not report['errors']
     report['semantic_certification'] = False
-    write_json(root/'split-audit.json',report)
+    write_json(Path(output_path) if output_path else root/'split-audit.json',report)
     print(json.dumps(report,indent=2))
     return report
 
@@ -52,5 +52,6 @@ def audit(root, sanitize_pool=False):
 if __name__ == '__main__':
     p=argparse.ArgumentParser();p.add_argument('--data-dir',required=True)
     p.add_argument('--sanitize-pool',action='store_true',help='Remove screened records from an older reserved pool; never changes the three splits')
+    p.add_argument('--output', help='Write the report outside the prepared dataset')
     a=p.parse_args()
-    if not audit(a.data_dir,a.sanitize_pool)['passed']: raise SystemExit(2)
+    if not audit(a.data_dir,a.sanitize_pool,a.output)['passed']: raise SystemExit(2)
