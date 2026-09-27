@@ -97,13 +97,14 @@ def aggregate(rows, records, n, ks, complete_scope=False):
         domains['quality']['subdomain_weights'] = quality_weights
     elif complete_scope and any(quality_groups.values()):
         full = False
+    has_all_domains = not incomplete and all(domains.values())
     return {'schema_version': 2, 'valid_full_benchmark': bool(full), 'long_context_by_length': lengths,
             'truncated_samples': truncated_samples,
             'scoring_policy': 'fixed_budget_v1',
             'truncation_free': not bool(truncated_samples),
             'comparison_budget_valid': not bool(incomplete or errors),
             'score_interpretation': 'Fixed-budget performance: capped trajectories score zero and fail pass@k; judge errors are not model failures.',
-            'aggregate_score_0_100': 10 * sum(d['score'] for d in domains.values()) if full else None,
+            'aggregate_score_0_100': 10 * sum(d['score'] for d in domains.values()) if has_all_domains else None,
             'aggregation': 'prompt mean -> fixed protocol task weights -> ten equal domain weights', 'strata': strata,
             'domains': domains, 'tasks': tasks, 'infrastructure_errors': errors,
             'incomplete_prompts': incomplete, 'n_samples': n, 'pass_k': ks,

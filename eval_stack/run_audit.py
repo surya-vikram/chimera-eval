@@ -304,12 +304,28 @@ def markdown(report):
              f"Binary failures: {o['binary_failed_samples']}; grading errors: {o['grading_error_samples']}; "
              f"missing: {o['missing_samples']}; saved but pending: {o['pending_saved_samples']}.", '',
              f"Truncation: {o['truncated_samples']} samples / {o['truncated_turns']} turns. "
-             f"Integrity issues: {len(report['integrity_issues'])}; policy violations: {len(report['policy_violations'])}.", '',
-             '## Domain coverage and failures', '',
-             '| Domain | Valid / expected | Binary failed | Grading errors | Truncated samples |',
-             '|---|---:|---:|---:|---:|']
-    for name, d in report['domains'].items():
-        lines.append(f"| {name} | {d['valid_samples']} / {d['expected_samples']} | {d['binary_failed_samples']} | {d['grading_error_samples']} | {d['truncated_samples']} |")
+             f"Integrity issues: {len(report['integrity_issues'])}; policy violations: {len(report['policy_violations'])}.", '']
+    scores = report.get('scores') or {}
+    agg = scores.get('aggregate_score_0_100')
+    if agg is not None:
+        lines += [f'## Aggregate Score: {agg:.1f} / 100', '']
+    domain_scores = scores.get('domains') or {}
+    if domain_scores:
+        lines += ['## Domain coverage and scores', '',
+                  '| Domain | Valid / expected | Score | Pass@1 | Pass@2 | Binary failed | Truncated |',
+                  '|---|---:|---:|---:|---:|---:|---:|']
+        for name, d in report['domains'].items():
+            ds = domain_scores.get(name) or {}
+            sc = f"{ds['score']*100:.1f}%" if ds.get('score') is not None else '—'
+            p1 = f"{ds['pass']['1']*100:.1f}%" if ds.get('pass', {}).get('1') is not None else '—'
+            p2 = f"{ds['pass']['2']*100:.1f}%" if ds.get('pass', {}).get('2') is not None else '—'
+            lines.append(f"| {name} | {d['valid_samples']} / {d['expected_samples']} | {sc} | {p1} | {p2} | {d['binary_failed_samples']} | {d['truncated_samples']} |")
+    else:
+        lines += ['## Domain coverage and failures', '',
+                  '| Domain | Valid / expected | Binary failed | Grading errors | Truncated samples |',
+                  '|---|---:|---:|---:|---:|']
+        for name, d in report['domains'].items():
+            lines.append(f"| {name} | {d['valid_samples']} / {d['expected_samples']} | {d['binary_failed_samples']} | {d['grading_error_samples']} | {d['truncated_samples']} |")
     def fmt(v):
         return '—' if v is None else f'{v:,.1f}'
     lines += ['', '## Frozen prompt inventory (preparation tokenizer; all selected prompts)', '',
