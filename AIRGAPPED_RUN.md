@@ -13,17 +13,15 @@ docker pull suryavikram6/chimera-eval:0.1.1
 docker save -o chimera-eval-image.tar suryavikram6/chimera-eval:0.1.1
 ```
 
-Download the private dataset v3 with an account that has access. Follow the
-dataset download instructions in [METADATA_REPAIR.md](METADATA_REPAIR.md), using
-revision `0c4b5e43d163f333422fa0855e6f1fb708acbc7a`. For a main evaluation, the
-required files are `manifest.json` and `splits/main_test.jsonl`.
-
-For example, after installing the Hugging Face CLI and signing in:
+Download dataset v5 (`quality-v5-clean`, public) at revision
+`9f204f733a762c3766407636e1fbb4f8aa41dc9e`. For a main evaluation the required
+files are `manifest.json` and `splits/main_test.jsonl` (`main_test` is unchanged since v3). From
+this repository folder, with the Hugging Face CLI installed:
 
 ```bash
 hf download surya-vikram/chimera-eval-data manifest.json splits/main_test.jsonl \
   --repo-type dataset \
-  --revision 0c4b5e43d163f333422fa0855e6f1fb708acbc7a \
+  --revision 9f204f733a762c3766407636e1fbb4f8aa41dc9e \
   --local-dir ./prepared-data
 tar -czf chimera-eval-data.tar.gz -C prepared-data manifest.json splits
 ```
@@ -33,26 +31,27 @@ the CLI treats the second path as a filename, ignores `--include`, and skips
 `manifest.json`. Check that both files are present before transferring.
 
 Transfer the image archive, prepared data, and this repository to the evaluation
-machine. Load the image and unpack data there:
+machine. Load the image and unpack the data into `prepared-data/` inside the repository, where
+`run_eval.sh` looks by default (`DATA_PATH` points elsewhere if you prefer):
 
 ```bash
 docker load -i chimera-eval-image.tar
-mkdir -p /data/chimera-eval
-tar -xzf chimera-eval-data.tar.gz -C /data/chimera-eval
+mkdir -p prepared-data
+tar -xzf chimera-eval-data.tar.gz -C prepared-data
 ```
 
 The data directory should contain:
 
 ```text
-/data/chimera-eval/manifest.json
-/data/chimera-eval/splits/main_test.jsonl
+prepared-data/manifest.json
+prepared-data/splits/main_test.jsonl
 ```
 
 ## 2. Configure and run
 
 Edit the configuration block near the top of [`run_eval.sh`](run_eval.sh). Set:
 
-- `DATA_PATH` and `OUTPUT_PATH`.
+- `DATA_PATH` and `OUTPUT_PATH` (defaults: `prepared-data/` and `outputs/` in this folder).
 - `MODEL_URL` / `MODEL_NAME` and `JUDGE_URL` / `JUDGE_NAME`.
 - Actual `MODEL_CONTEXT` and `JUDGE_CONTEXT` limits.
 - `MODEL_KV_CACHE_NUM_TOKENS` and `JUDGE_KV_CACHE_NUM_TOKENS`, or leave them at

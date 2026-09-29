@@ -4,8 +4,15 @@ Start with [QUICKSTART.md](QUICKSTART.md) for the prepared local data and Docker
 For disconnected systems, use [AIRGAPPED_RUN.md](AIRGAPPED_RUN.md), including
 image transfer, prepared split sizes, configuration, and the offline launch command.
 
-Current image: `suryavikram6/chimera-eval:0.1.1`. Use dataset v3; see
-[MCQA metadata repair](METADATA_REPAIR.md). Main-test prompts and scores are unaffected.
+Current image: `suryavikram6/chimera-eval:0.1.1`. Current data: dataset v5 (`quality-v5-clean`),
+revision `9f204f733a762c3766407636e1fbb4f8aa41dc9e`; `main_test` is unchanged since v3, so scores stay comparable.
+For evaluation, download the two files `run_eval.sh` needs into `prepared-data/` in this folder:
+
+```bash
+hf download surya-vikram/chimera-eval-data manifest.json splits/main_test.jsonl \
+  --repo-type dataset --revision 9f204f733a762c3766407636e1fbb4f8aa41dc9e \
+  --local-dir prepared-data
+```
 
 Endpoint-only evaluation and preparation of three family-disjoint partitions: `rl_train`,
 `rl_val`, and `main_test`. No Slime training code lives here.

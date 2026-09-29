@@ -56,5 +56,5 @@ audits MCQA labels/extraction, updates split counts/hashes, and writes
 locally, it is copied and cross-checked; it is not included in the HF download.
 Never overwrite v2 in place or mix its manifest with the repaired files.
 
-For normal users no repair command is needed: download the pinned v3 snapshot
-using [AIRGAPPED_RUN.md](AIRGAPPED_RUN.md).
+For normal users no repair command is needed: download the current pinned snapshot
+(v5, which keeps these repairs and the same `main_test`) using [AIRGAPPED_RUN.md](AIRGAPPED_RUN.md).
