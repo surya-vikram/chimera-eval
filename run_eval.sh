@@ -40,10 +40,10 @@ declare -A CONFIG=(
   [EVAL_CONTEXT_BUCKETS]=""            # Blank = all fitting; e.g. "4096,8192,16384"
 
   # Model sampling: the same as Chimera MixRL rollouts and training (slime mixrl/config.env
-  # ROLLOUT_TEMPERATURE=1.0, ROLLOUT_TOP_P=0.95, top-k off). Chat template options: '{}' for Chimera.
+  # ROLLOUT_TEMPERATURE=1.0, ROLLOUT_TOP_P=0.95, ROLLOUT_TOP_K=20). Chat template options: '{}' for Chimera.
   [MODEL_TEMPERATURE]=1.0
   [MODEL_TOP_P]=0.95
-  [MODEL_TOP_K]=-1
+  [MODEL_TOP_K]=20
   [MODEL_REPETITION_PENALTY]=1.0
   [MODEL_MIN_P]=0.0
   [MODEL_PRESENCE_PENALTY]=0.0
