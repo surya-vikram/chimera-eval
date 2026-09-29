@@ -88,13 +88,14 @@ Both model endpoints must provide `/v1/chat/completions` and vLLM's `/tokenize`.
 
 Look under `OUTPUT_DIR/RUN_NAME/`:
 
-- `metrics.json`: task/domain scores, binary pass@2, context-profile scores, errors,
-  and truncation counts. The primary aggregate is withheld when validity gates fail.
+- `metrics.json`: task/domain scores, binary pass@k, context-profile scores, errors,
+  and truncation counts. The aggregate is always reported; `aggregate_complete` is
+  false when domains are missing or have ungraded prompts.
 - `reliability.json`: judge-attempt statistics and diagnostic score/length/repetition checks.
-- `samples/`: saved generated answers and grades.
+- `samples/`: saved generated answers with the prompt each turn answered, and grades.
 - `judge_attempts/`: auditable judge requests, outputs, and retries.
 - `config.json`: exact configuration and data/code fingerprint.
-- `audit/report.md`: coverage, failures, and prompt/response token distributions by domain and task.
+- `audit/report.md`: scores with every pass@k, zero-score reasons, coverage, and prompt/response token distributions by domain and task.
 - `audit/report.json`: percentiles, histograms, judge usage, per-turn/trajectory statistics, and recomputed scores.
 - `audit/samples.jsonl`: one audit entry for every expected sample, including missing/pending entries.
 

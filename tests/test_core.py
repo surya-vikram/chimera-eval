@@ -129,8 +129,23 @@ class CoreTests(unittest.TestCase):
                 results.append({'id':r['id'], 'sample':0,'grade':{'status':'valid','score':float(i==0),'passed':i==0}})
         report = aggregate(rows,results,1,[1],True)
         self.assertEqual(report['aggregate_score_0_100'], 10)
+        self.assertTrue(report['aggregate_complete'])
+        # A missing result never counts as zero, and the aggregate is still reported, flagged partial.
         report = aggregate(rows,results[:-1],1,[1],True)
-        self.assertIsNone(report['aggregate_score_0_100'])
+        self.assertEqual(report['aggregate_score_0_100'], 10)
+        self.assertFalse(report['aggregate_complete'])
+        self.assertFalse(report['valid_full_benchmark'])
+        self.assertEqual(report['aggregate_partial_domains'], [DOMAINS[-1]])
+        self.assertEqual(report['domains'][DOMAINS[-1]]['scored_prompts'], len(DOMAINS) - 1)
+
+    def test_aggregate_over_selected_domains(self):
+        rows = [{'id':d,'task':d,'domain':d,'binary':True} for d in ('math','logic')]
+        results = [{'id':'math','sample':0,'grade':{'status':'valid','score':1.,'passed':True}},
+                   {'id':'logic','sample':0,'grade':{'status':'error','error':'judge down'}}]
+        report = aggregate(rows,results,1,[1],False)
+        self.assertEqual(report['aggregate_score_0_100'], 100)
+        self.assertEqual(report['aggregate_missing_domains'], [d for d in DOMAINS if d != 'math'])
+        self.assertIsNone(aggregate(rows,results[1:],1,[1],False)['aggregate_score_0_100'])
 
 
 if __name__ == '__main__': unittest.main()

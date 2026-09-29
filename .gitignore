@@ -8,3 +8,4 @@ outputs/
 models/
 vendor/
 *.log
+prepared-data/

@@ -8,7 +8,7 @@ import math
 from pathlib import Path
 import statistics
 
-from .common import digest, read_jsonl, validate_record, write_json, write_jsonl
+from .common import DOMAINS, digest, read_jsonl, validate_record, write_json, write_jsonl
 
 
 def numeric(value):
@@ -102,6 +102,37 @@ def compact_record(record, row):
                       'kv_admission': r.get('kv_admission')})
     return {'id': record['id'], 'sample': record['sample'], 'task': row['task'], 'domain': row['domain'],
             'binary': row.get('binary', True), 'grade': grade, 'turns': turns}
+
+
+def failure_reason(record):
+    """Why a graded sample earned nothing, from its grade components."""
+    if any(t['finish_reason'] == 'length' for t in record['turns']):
+        return 'truncated'
+    c = record['grade'].get('components') or {}
+    if c.get('failure'):
+        return c['failure'].replace('_', ' ')
+    if c.get('execution_status'):
+        detail = ('syntax error' if c.get('syntax_error') else
+                  'requested function not defined' if c.get('defines_entry_point') is False else c['execution_status'])
+        return 'code: ' + detail
+    if c.get('syntax') is False:
+        return 'unparseable structure'
+    if c.get('schema') is False:
+        return 'schema mismatch'
+    if c.get('requested_format') is False:
+        return 'answer in other format'
+    if 'acceptability' in c:
+        return 'mandatory check failed' if (c.get('judge') or {}).get('mandatory_pass') is False else 'lowest quality score'
+    return 'wrong answer'
+
+
+def failure_reasons(records):
+    reasons = defaultdict(Counter)
+    for r in records:
+        grade = r['grade']
+        if grade.get('status') == 'valid' and grade.get('passed') is not True and not grade.get('score'):
+            reasons[r['task']][failure_reason(r)] += 1
+    return {task: dict(counts.most_common()) for task, counts in sorted(reasons.items())}
 
 
 def summarize(rows, records, n):
@@ -249,8 +280,9 @@ def audit_run(run_dir, data_dir, output_dir=None, running=None):
     if not active and (root / 'metrics.json').exists():
         existing = json.loads((root / 'metrics.json').read_text())
         consistency['checked'] = True
-        for key in ('truncated_samples', 'infrastructure_errors', 'incomplete_prompts',
-                    'aggregate_score_0_100', 'valid_full_benchmark'):
+        # aggregate_complete is absent from metrics written before it existed.
+        for key in ('truncated_samples', 'infrastructure_errors', 'incomplete_prompts', 'aggregate_score_0_100',
+                    'valid_full_benchmark', *(['aggregate_complete'] if 'aggregate_complete' in existing else [])):
             if existing.get(key) != scores[key]:
                 consistency['differences'].append({'metric': key, 'saved': existing.get(key), 'recomputed': scores[key]})
     report = {'schema_version': 1, 'snapshot_started_at': start,
@@ -263,7 +295,9 @@ def audit_run(run_dir, data_dir, output_dir=None, running=None):
                         'split_hash_verified': expected_hash is not None, 'selection_fingerprint_verified': True,
                         'sample_files_scanned': len(paths)},
               'overall': overall, **groups,
-              'scores': scores, 'saved_metrics_consistency': consistency,
+              'task_domains': {r['task']: r['domain'] for r in selected},
+              'scores': scores, 'failure_reasons': failure_reasons(records),
+              'saved_metrics_consistency': consistency,
               'task_summary': {'expected': len(tasks),
                   'complete': sum(v['complete_prompts'] == v['expected_prompts'] for v in tasks.values()),
                   'with_binary_failures': [k for k, v in tasks.items() if v['binary_failed_samples']],
@@ -294,6 +328,61 @@ def audit_run(run_dir, data_dir, output_dir=None, running=None):
     return report
 
 
+def pct(value):
+    return '—' if value is None else f'{100 * value:.1f}%'
+
+
+def table(header, rows):
+    """Markdown table padded to column width, so it reads the same in a terminal and a renderer."""
+    widths = [max(len(str(r[i])) for r in [header, *rows]) for i in range(len(header))]
+    def line(cells):
+        return '| ' + ' | '.join(str(v).ljust(w) if i == 0 else str(v).rjust(w)
+                                 for i, (v, w) in enumerate(zip(cells, widths))) + ' |'
+    rule = '|' + '|'.join('-' * (w + 2) if i == 0 else '-' * (w + 1) + ':' for i, w in enumerate(widths)) + '|'
+    return [line(header), rule, *map(line, rows)]
+
+
+def task_order(task, report):
+    domain = (report.get('task_domains') or {}).get(task) or ((report.get('scores') or {}).get('tasks', {}).get(task) or {}).get('domain')
+    return (DOMAINS.index(domain) if domain in DOMAINS else len(DOMAINS), task)
+
+
+def score_tables(scores, audit=None):
+    """Aggregate, domain and task scores with a pass@k column for every requested k.
+    With an audit report, sample coverage, truncation and error counts are added."""
+    ks = [str(k) for k in scores.get('pass_k') or [1]]
+    agg = scores.get('aggregate_score_0_100')
+    if agg is None:
+        head = 'Aggregate score: — (no domain has a fully graded prompt yet)'
+    else:
+        head = f'Aggregate score: {agg:.1f} / 100'
+        if not scores.get('aggregate_complete'):
+            gaps = [f"{label} {', '.join(names)}" for label, names in
+                    (('missing', scores.get('aggregate_missing_domains')),
+                     ('incomplete', scores.get('aggregate_partial_domains'))) if names]
+            head += f" (partial: {'; '.join(gaps)})" if gaps else ' (partial)'
+    audit = audit or {}
+    counts = ['Samples', *[f'Pass@{k}' for k in ks], 'Truncated', 'Errors'] if audit else ['Prompts', *[f'Pass@{k}' for k in ks]]
+    def row(name, s, group):
+        score = pct(s.get('score')) + ('*' if s and s.get('complete') is False else '')
+        passes = [pct((s.get('pass') or {}).get(k)) for k in ks]
+        if not audit:
+            return [name, f"{s.get('scored_prompts', s.get('prompts', 0))} / {s.get('prompts', 0)}", score, *passes]
+        g = group or {}
+        return [name, f"{g.get('valid_samples', 0)} / {g.get('expected_samples', 0)}", score, *passes,
+                g.get('truncated_samples', 0), g.get('grading_error_samples', 0)]
+    domains = scores.get('domains') or {}
+    shown = [d for d in DOMAINS if domains.get(d) or d in audit.get('domains', {})]
+    domain_rows = [row(d, domains.get(d) or {}, audit.get('domains', {}).get(d)) for d in shown]
+    task_scores = scores.get('tasks') or {}
+    names = sorted(set(task_scores) | set(audit.get('tasks', {})), key=lambda t: task_order(t, {**audit, 'scores': scores}))
+    task_rows = [row(t, task_scores.get(t) or {}, audit.get('tasks', {}).get(t)) for t in names]
+    header = lambda first: [first, counts[0], 'Score', *counts[1:]]
+    return [head, '', *table(header('Domain'), domain_rows), '', *table(header('Task'), task_rows), '',
+            'Score: mean prompt score, truncated responses count 0. Pass@k: unbiased estimate from '
+            f"{scores.get('n_samples', '?')} samples per prompt. * domain has ungraded prompts."]
+
+
 def markdown(report):
     o = report['overall']
     state = 'RUNNING SNAPSHOT' if report['running'] else ('COMPLETE COVERAGE' if report['coverage_complete'] else 'INCOMPLETE COVERAGE')
@@ -305,27 +394,13 @@ def markdown(report):
              f"missing: {o['missing_samples']}; saved but pending: {o['pending_saved_samples']}.", '',
              f"Truncation: {o['truncated_samples']} samples / {o['truncated_turns']} turns. "
              f"Integrity issues: {len(report['integrity_issues'])}; policy violations: {len(report['policy_violations'])}.", '']
-    scores = report.get('scores') or {}
-    agg = scores.get('aggregate_score_0_100')
-    if agg is not None:
-        lines += [f'## Aggregate Score: {agg:.1f} / 100', '']
-    domain_scores = scores.get('domains') or {}
-    if domain_scores:
-        lines += ['## Domain coverage and scores', '',
-                  '| Domain | Valid / expected | Score | Pass@1 | Pass@2 | Binary failed | Truncated |',
-                  '|---|---:|---:|---:|---:|---:|---:|']
-        for name, d in report['domains'].items():
-            ds = domain_scores.get(name) or {}
-            sc = f"{ds['score']*100:.1f}%" if ds.get('score') is not None else '—'
-            p1 = f"{ds['pass']['1']*100:.1f}%" if ds.get('pass', {}).get('1') is not None else '—'
-            p2 = f"{ds['pass']['2']*100:.1f}%" if ds.get('pass', {}).get('2') is not None else '—'
-            lines.append(f"| {name} | {d['valid_samples']} / {d['expected_samples']} | {sc} | {p1} | {p2} | {d['binary_failed_samples']} | {d['truncated_samples']} |")
-    else:
-        lines += ['## Domain coverage and failures', '',
-                  '| Domain | Valid / expected | Binary failed | Grading errors | Truncated samples |',
-                  '|---|---:|---:|---:|---:|']
-        for name, d in report['domains'].items():
-            lines.append(f"| {name} | {d['valid_samples']} / {d['expected_samples']} | {d['binary_failed_samples']} | {d['grading_error_samples']} | {d['truncated_samples']} |")
+    lines += ['## Scores', '', *score_tables(report.get('scores') or {}, report), '']
+    reasons = report.get('failure_reasons') or {}
+    if reasons:
+        lines += ['## Why samples scored zero', '',
+                  *table(['Task', 'Samples', 'Reasons'],
+                         [[task, sum(r.values()), ' · '.join(f'{k} {v}' for k, v in r.items())]
+                          for task, r in sorted(reasons.items(), key=lambda x: task_order(x[0], report))]), '']
     def fmt(v):
         return '—' if v is None else f'{v:,.1f}'
     lines += ['', '## Frozen prompt inventory (preparation tokenizer; all selected prompts)', '',
@@ -343,11 +418,6 @@ def markdown(report):
             s = d['per_turn'][key]
             lines.append('| ' + name + ' | ' + ' | '.join(fmt(s[k]) for k in
                          ('count', 'missing', 'total', 'mean', 'stddev', 'min', 'p50', 'p90', 'p95', 'p99', 'max')) + ' |')
-    lines += ['', '## Task status', '',
-              '| Task | Valid / expected | Binary failed | Grading errors | Truncated samples |',
-              '|---|---:|---:|---:|---:|---:|']
-    for name, d in report['tasks'].items():
-        lines.append(f"| {name} | {d['valid_samples']} / {d['expected_samples']} | {d['binary_failed_samples']} | {d['grading_error_samples']} | {d['truncated_samples']} |")
     lines += ['', '## Interpretation', ''] + ['- ' + x for x in report['notes']]
     lines += ['', 'Full distributions, histogram buckets, judge usage, and task summaries: `report.json`.',
               'Every expected sample, including missing ones: `samples.jsonl`.', '']

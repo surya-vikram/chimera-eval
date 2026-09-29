@@ -10,6 +10,8 @@ from .graders import Grader, result
 from .judging import protocol_id
 from .metrics import aggregate
 from .monitoring import audit_records
+from .progress import Progress
+from .run_audit import score_tables
 from .runner import settings
 from .token_budget import TokenBudget
 
@@ -83,11 +85,10 @@ def _regrade(source,out):
             record['grade']=grades[0] if len(grades)==1 else result(all(g['passed'] for g in grades),all(g['passed'] for g in grades),turn_fraction=sum(g['score'] for g in grades)/len(grades))
         except Exception as e: record['grade']={'status':'error','error':f'{type(e).__name__}: {e}'}
         write_json(dest,record);return record
-    records=[]
+    records=[];progress=Progress(len(paths))
     with futures.ThreadPoolExecutor(max_workers=c['MAX_PENDING']) as pool:
         for record in pool.map(work,paths):
-            records.append(record)
-            print(json.dumps({'completed':len(records),'total':len(paths),'status':record['grade']['status']}),flush=True)
+            records.append(record);progress.update(record)
     chosen=[r for r in rows if r['id'] in {x['id'] for x in records}]
     n=original['config']['N_SAMPLES'];ks=original['config']['PASS_K']
     report=aggregate(chosen,records,n,ks,False)
@@ -95,4 +96,5 @@ def _regrade(source,out):
                   source_target_sampling=original['config'].get('MODEL_SAMPLING'),judge_protocol=protocol_id(),
                   judge_validation='requires independent calibration; no automatic certification')
     write_json(out/'metrics.json',report);write_json(out/'reliability.json',audit_records(records,out/'judge_attempts'))
+    print('\n'.join(['',*score_tables(report),'',f"Metrics: {out/'metrics.json'}"]),flush=True)
     return report

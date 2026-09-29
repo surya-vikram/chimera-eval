@@ -199,6 +199,40 @@ def structured_candidates(text, fmt):
     return unique
 
 
+CODE_FENCE = re.compile(r"```[ \t]*([\w+.#-]*)[^\n]*\n(.*?)```", re.S)
+PYTHON_FENCES = ("", "python", "py", "python3", "py3")
+
+
+def candidate_code(text, entry_point=None):
+    """(program, where it came from). The last Python code block is the answer; when a function is
+    requested, the last block that defines it, so a usage example written after it is not run.
+    An unfenced response runs as written; an unclosed final fence still counts as the block."""
+    blocks = [code for lang, code in CODE_FENCE.findall(text) if lang.casefold() in PYTHON_FENCES]
+    if not blocks:
+        unclosed = re.match(r"\s*```[ \t]*(?:python3?|py3?)?[ \t]*\n(.*)", text, re.S | re.I)
+        return (unclosed.group(1), "unclosed_block") if unclosed else (text, "whole_response")
+    if entry_point:
+        defines = re.compile(r"^[ \t]*(?:async[ \t]+)?def[ \t]+" + re.escape(entry_point) + r"[ \t]*\(", re.M)
+        for index in range(len(blocks) - 1, -1, -1):
+            if defines.search(blocks[index]):
+                return blocks[index], f"block {index + 1} of {len(blocks)}"
+    return blocks[-1], f"block {len(blocks)} of {len(blocks)}"
+
+
+def code_diagnostics(code, entry_point=None):
+    """Why a program may have failed, for reports only; the sandbox verdict is the grade."""
+    import ast
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as e:
+        return {"syntax_error": f"line {e.lineno}: {e.msg}"}
+    if not entry_point:
+        return {}
+    names = {n.name for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    names |= {t.id for n in ast.walk(tree) if isinstance(n, ast.Assign) for t in n.targets if isinstance(t, ast.Name)}
+    return {"defines_entry_point": entry_point in names}
+
+
 # How grade() can reach the judge for a row, ordered from never to every answer.
 # none: never. on_miss: only after the deterministic check fails.
 # to_pass: deterministic checks can only fail an answer; passing needs the judge.
@@ -499,8 +533,7 @@ class Grader:
                 raise GradingError('Sandbox image not available locally: ' + self.code_image)
 
     def execute_code(self, row, text):
-        code_blocks = re.findall(r"```(?:python|py)?\s*\n(.*?)```", text, re.S)
-        code = code_blocks[-1] if code_blocks else text
+        code, source = candidate_code(text, row["verification"].get("entry_point"))
         name = 'chimera-code-' + uuid.uuid4().hex
         command = ["docker", "run", "--pull=never", "--name", name, "--rm", "-i", "--network", "none", "--read-only",
                    "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "64",
@@ -526,4 +559,7 @@ class Grader:
             raise GradingError("Malformed sandbox result") from e
         if data.get("status") != "valid":
             raise GradingError(str(data))
+        data.setdefault("components", {})["code_source"] = source
+        if not data.get("passed"):
+            data["components"].update(code_diagnostics(code, row["verification"].get("entry_point")))
         return data

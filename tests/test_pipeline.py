@@ -96,8 +96,16 @@ class PipelineTests(unittest.TestCase):
                    'MODEL_NAME':'fixture','JUDGE_NAME':'fixture','N_SAMPLES':'4','PASS_K':'1,4','MAX_PENDING':'2',
                    'MODEL_KV_CACHE_NUM_TOKENS': str(model_capacity),
                    'JUDGE_KV_CACHE_NUM_TOKENS': str(judge_capacity)}
-            with patch.dict(os.environ,cfg,clear=True), contextlib.redirect_stdout(io.StringIO()):
+            stdout = io.StringIO()
+            with patch.dict(os.environ,cfg,clear=True), contextlib.redirect_stdout(stdout):
                 a = evaluate()
+                # Progress lines, not a line per sample; the final score table has every pass@k.
+                printed = stdout.getvalue()
+                self.assertNotIn('"completed"', printed)
+                self.assertIn('8/8 (100%)', printed)
+                self.assertIn('Pass@4', printed)
+                self.assertIn('Aggregate score:', printed)
+                self.assertIn('Pass@4', (root/'out/evaluation/audit/report.md').read_text())
                 expected_roles = {role for role, capacity in [('MODEL', model_capacity), ('JUDGE', judge_capacity)] if capacity}
                 self.assertEqual(set(a['kv_token_budgets']), expected_roles)
                 for role, capacity in [('MODEL', model_capacity), ('JUDGE', judge_capacity)]:
@@ -109,6 +117,7 @@ class PipelineTests(unittest.TestCase):
                         self.assertLessEqual(entry['peak_reserved_tokens'], capacity)
                 for path in (root/'out/evaluation/samples').glob('*.json'):
                     for turn in json.loads(path.read_text())['turns']:
+                        self.assertEqual(turn['prompt'], [{'role':'user','content':'Question'}])
                         admission = turn['response']['kv_admission']
                         if model_capacity:
                             self.assertEqual(admission['reserved_tokens'], 138)

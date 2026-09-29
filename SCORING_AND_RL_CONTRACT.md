@@ -34,7 +34,10 @@ Check tokenized prompt length plus the requested output allowance before generat
 Never silently shorten prompts or shrink output budgets to fit. Long-context tasks
 must reserve output space and disclose actual prompt lengths.
 
-Any candidate `finish_reason=length` invalidates the primary aggregate:
+Superseded (2026-09-29): `aggregate_score_0_100` is always reported, as the mean of the
+domains that have fully graded prompts; `aggregate_complete` says whether it covers all
+ten domains with every selected prompt graded. Grading errors are never scored as zero.
+Historical text: any candidate `finish_reason=length` invalidated the primary aggregate:
 `comparison_budget_valid=false`, `valid_full_benchmark=false`, and
 `aggregate_score_0_100=null`. Saved task/domain scores and pass@k are diagnostic only.
 The CLI prints `TRUNCATION DETECTED` and exits 3 after saving reports. Grading or

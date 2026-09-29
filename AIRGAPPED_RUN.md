@@ -21,13 +21,16 @@ required files are `manifest.json` and `splits/main_test.jsonl`.
 For example, after installing the Hugging Face CLI and signing in:
 
 ```bash
-hf download surya-vikram/chimera-eval-data \
+hf download surya-vikram/chimera-eval-data manifest.json splits/main_test.jsonl \
   --repo-type dataset \
   --revision 0c4b5e43d163f333422fa0855e6f1fb708acbc7a \
-  --include manifest.json splits/main_test.jsonl \
   --local-dir ./prepared-data
 tar -czf chimera-eval-data.tar.gz -C prepared-data manifest.json splits
 ```
+
+Name the files as arguments, as above. With `--include manifest.json splits/main_test.jsonl`
+the CLI treats the second path as a filename, ignores `--include`, and skips
+`manifest.json`. Check that both files are present before transferring.
 
 Transfer the image archive, prepared data, and this repository to the evaluation
 machine. Load the image and unpack data there:
@@ -67,9 +70,10 @@ Then run:
 bash run_eval.sh
 ```
 
-The default is a quick diagnostic: one prompt per task across all domains, one
-response per prompt. For the full frozen inventory, set `LIMIT_PER_TASK=0`. For
-pass@2, set `N_SAMPLES=2` and `PASS_K="1,2"`. Leave `TASKS` blank to include all
+The checked-in configuration is a diagnostic: up to 50 prompts per task across all
+domains, four responses per prompt, pass@1 and pass@4. For the full frozen inventory,
+set `LIMIT_PER_TASK=0`. `PASS_K` takes any values up to `N_SAMPLES`; the report
+has one column per value. Leave `TASKS` blank to include all
 tasks. Select a smaller subset with comma-separated task IDs or reduce individual
 task counts in `TASK_SAMPLE_COUNTS_JSON`.
 
@@ -83,14 +87,24 @@ bash run_eval.sh --dry-run
 
 ## 3. Follow the run and inspect results
 
-Progress streams to the terminal and `OUTPUT_PATH/RUN_NAME.log`. Results are saved
+The terminal and `OUTPUT_PATH/RUN_NAME.log` show one progress line every
+`PROGRESS_SECONDS` (default 30) with counts of passed, failed, truncated and errored
+samples, plus each distinct grading error the first time it occurs. At the end the
+aggregate score and the domain and task score tables are printed. Results are saved
 under `OUTPUT_PATH/RUN_NAME/`:
 
 - `metrics.json`: task/domain scores, pass@k, truncation, errors and token totals.
-- `audit/report.md` and `audit/report.json`: sample coverage and prompt/response
-  token distributions by domain and task.
+  `aggregate_score_0_100` is always reported once any domain has a fully graded
+  prompt: the equal-weight mean of the scored domains. `aggregate_complete` is true
+  only when all ten domains are present with every selected prompt graded;
+  `aggregate_missing_domains` and `aggregate_partial_domains` name the gaps.
+- `audit/report.md` and `audit/report.json`: scores with a column for every pass@k,
+  why samples scored zero (truncated, wrong answer, code syntax error, and so on),
+  sample coverage, and prompt/response token distributions by domain and task.
 - `audit/samples.jsonl`: one entry for every expected sample, including missing ones.
-- `samples/` and `judge_attempts/`: auditable answers and judge calls.
+- `samples/`: one file per response. Each turn holds the `prompt` messages it
+  answered next to the `response`, then the grade.
+- `judge_attempts/`: auditable judge calls.
 - `config.json`: the frozen settings and run fingerprint.
 
 Exit 0 means grading completed without unresolved errors; it does not certify judge

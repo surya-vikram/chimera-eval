@@ -210,7 +210,8 @@ evidence depths: only distinct query families count towards a per-length allocat
 
 `metrics.json` has `long_context_by_length` and `untested_length_buckets`. An 8K server
 does not attempt 16K–128K and those cells are not scored zero. Missing required lengths
-invalidate the full ten-domain aggregate, while completed domain/length results remain visible.
+make the aggregate partial (`aggregate_complete=false`, `valid_full_benchmark=false`); it is
+still reported over what was measured, and completed domain/length results remain visible.
 Separate scores are evidence of measured performance; a server's configured window is not
 a measured effective-context guarantee. Larger-context live validation needs a capable server.
 

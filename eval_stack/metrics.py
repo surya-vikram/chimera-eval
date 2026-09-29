@@ -51,21 +51,27 @@ def aggregate(rows, records, n, ks, complete_scope=False):
     planned = collections.Counter(r['task'] for r in rows)
     for domain in DOMAINS:
         names = [t for t in planned if next(r for r in rows if r['task'] == t)['domain'] == domain]
-        if not names or any(t not in tasks or tasks[t]['prompts'] != planned[t] for t in names):
+        # Score a domain from its tasks with at least one fully graded prompt; 'complete' says
+        # whether every planned prompt of every task counted. Errors are never scored as zero.
+        scored = [t for t in names if t in tasks]
+        if not scored:
             domains[domain] = None
             continue
-        weights = {t: fixed.get(t, 1.) for t in names}
+        weights = {t: fixed.get(t, 1.) for t in scored}
         if domain == 'long_context':
-            for t in names:
+            for t in scored:
                 subtype = t.split('_', 2)[-1]
                 weights[t] = .3 if subtype in ('rag', 'icl') else .4 / 10
         total = sum(weights.values())
-        domains[domain] = {'score': sum(tasks[t]['score'] * weights[t] for t in names) / total,
-                           'task_weights': {t: weights[t]/total for t in names},
+        domains[domain] = {'score': sum(tasks[t]['score'] * weights[t] for t in scored) / total,
+                           'complete': all(t in tasks and tasks[t]['prompts'] == planned[t] for t in names),
+                           'task_weights': {t: weights[t]/total for t in scored},
                            'tasks': names, 'prompts': sum(planned[t] for t in names),
-                           'pass': {str(k): sum(tasks[t]['pass'][str(k)] * weights[t] for t in names) / total
-                                    if all(tasks[t]['pass'][str(k)] is not None for t in names) else None for k in ks}}
-    full = complete_scope and not incomplete and all(domains.values())
+                           'scored_prompts': sum(tasks[t]['prompts'] for t in scored),
+                           'pass': {str(k): sum(tasks[t]['pass'][str(k)] * weights[t] for t in scored) / total
+                                    if all(tasks[t]['pass'][str(k)] is not None for t in scored) else None for k in ks}}
+    all_complete = all(d and d['complete'] for d in domains.values())
+    full = complete_scope and not incomplete and all_complete
     lengths = {}
     for length in sorted({r['length_bucket'] for r in rows if r.get('length_bucket')}):
         subset = [r for r in rows if r.get('length_bucket') == length]
@@ -97,15 +103,21 @@ def aggregate(rows, records, n, ks, complete_scope=False):
         domains['quality']['subdomain_weights'] = quality_weights
     elif complete_scope and any(quality_groups.values()):
         full = False
-    has_all_domains = not incomplete and all(domains.values())
+    # Always report an aggregate: the equal-weight mean of the domains that have scores.
+    # It is the protocol aggregate only when every domain is present and complete.
+    scored_domains = [d for d in domains.values() if d]
+    aggregate_complete = not incomplete and all_complete
     return {'schema_version': 2, 'valid_full_benchmark': bool(full), 'long_context_by_length': lengths,
             'truncated_samples': truncated_samples,
             'scoring_policy': 'fixed_budget_v1',
             'truncation_free': not bool(truncated_samples),
             'comparison_budget_valid': not bool(incomplete or errors),
             'score_interpretation': 'Fixed-budget performance: capped trajectories score zero and fail pass@k; judge errors are not model failures.',
-            'aggregate_score_0_100': 10 * sum(d['score'] for d in domains.values()) if has_all_domains else None,
-            'aggregation': 'prompt mean -> fixed protocol task weights -> ten equal domain weights', 'strata': strata,
+            'aggregate_score_0_100': 100 * statistics.mean(d['score'] for d in scored_domains) if scored_domains else None,
+            'aggregate_complete': aggregate_complete,
+            'aggregate_missing_domains': [k for k, d in domains.items() if not d],
+            'aggregate_partial_domains': [k for k, d in domains.items() if d and not d['complete']],
+            'aggregation': 'prompt mean -> fixed protocol task weights -> equal weights over scored domains (ten when complete)', 'strata': strata,
             'domains': domains, 'tasks': tasks, 'infrastructure_errors': errors,
             'incomplete_prompts': incomplete, 'n_samples': n, 'pass_k': ks,
             'note': 'Quality has no pass@k. main_test is a model/sampling selection set, not an untouched test.'}

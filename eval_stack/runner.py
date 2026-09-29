@@ -13,6 +13,7 @@ from .client import Client
 from .common import canonical, digest, env, read_jsonl, validate_record, write_json
 from .graders import Grader, result
 from .metrics import aggregate
+from .progress import Progress
 from .token_budget import TokenBudget, interleave_domains
 
 
@@ -192,6 +193,8 @@ def _evaluate():
                         messages.append(turn['message'])
                     current['verification'] = {'ids': turn['ids'], 'kwargs': turn['kwargs']}
                 current['messages'] = copy.deepcopy(messages)
+                # The messages this turn answers, saved beside its response.
+                prompt = copy.deepcopy(messages if not turn_index else [turn['message']])
                 cap = response_budget(row, c)
                 # Do not silently truncate prompts or reduce the requested completion budget.
                 context = context_limit(row, c['MODEL_CONTEXT'])
@@ -199,13 +202,15 @@ def _evaluate():
                     raise ValueError('Candidate context overflow; adjust declared context/cap, never truncate silently')
                 if turn_index < len(record['turns']):
                     item = record['turns'][turn_index]
+                    if 'prompt' not in item:
+                        item = record['turns'][turn_index] = {'prompt': prompt, **item}
                 else:
                     seed = (c['SEED'] + int(row['id'][:8], 16) + sample * 1009 + turn_index * 97) % (2**31)
                     # Long prefills share a separate bound so short-task concurrency
                     # can stay high without flooding KV cache with 128K requests.
                     with long_slots if not c['MODEL_KV_CACHE_NUM_TOKENS'] and row.get('length_bucket', 0) >= 16384 else contextlib.nullcontext():
                         response = model.complete(messages, cap, seed=seed)
-                    item = {'response': response}
+                    item = {'prompt': prompt, 'response': response}
                     record['turns'].append(item)
                     write_json(path, record)  # persist generation before a judge failure
                 if item.get('grade', {}).get('status') != 'valid':
@@ -227,19 +232,20 @@ def _evaluate():
         return record
 
     # Each worker grades its completion immediately. No generation-wide barrier.
+    progress = Progress(len(rows) * c['N_SAMPLES'], records)
     with futures.ThreadPoolExecutor(max_workers=c['MAX_PENDING']) as pool:
         iterator = interleave_domains(jobs) if token_mode else iter(jobs)
         pending = {pool.submit(work, job) for job in [next(iterator, None) for _ in range(c['MAX_PENDING'])] if job is not None}
         while pending:
-            done, pending = futures.wait(pending, return_when=futures.FIRST_COMPLETED)
+            done, pending = futures.wait(pending, timeout=progress.interval, return_when=futures.FIRST_COMPLETED)
             for f in done:
                 record = f.result()
                 records.append(record)
-                print(json.dumps({'completed': len(records), 'total': len(rows)*c['N_SAMPLES'],
-                                  'task': record['task'], 'status': record['grade']['status']}), flush=True)
+                progress.update(record)
                 job = next(iterator, None)
                 if job is not None:
                     pending.add(pool.submit(work, job))
+            progress.tick()
     complete = (not subset_by_count and not skipped and not c['TASKS'] and not c['LIMIT_PER_TASK'] and c['SPLIT'] == 'main_test'
                 and manifest.get('main_test_inventory_complete', manifest.get('complete_inventory', False)))
     report = aggregate(rows, records, c['N_SAMPLES'], c['PASS_K'], complete)
@@ -263,7 +269,8 @@ def _evaluate():
     write_json(out / 'metrics.json', report)
     from .monitoring import audit_records
     write_json(out / 'reliability.json', audit_records(records, out/'judge_attempts'))
-    from .run_audit import audit_run
-    audit_run(out, root, running=False)
-    print(json.dumps(report, indent=2), flush=True)
+    from .run_audit import audit_run, score_tables
+    audit = audit_run(out, root, running=False)
+    print('\n'.join(['', *score_tables(report, audit), '', f"Metrics: {out / 'metrics.json'}",
+                     f"Audit: {out / 'audit' / 'report.md'}"]), flush=True)
     return report

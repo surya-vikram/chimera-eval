@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Offline Docker launcher. Edit this block, then: bash run_eval.sh
 set -euo pipefail
-REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"  # e.g. /nvme_zone3/home/ekamai1/chimera/eval/src/chimera-eval-main
 
 # ======================= EDIT CONFIGURATION HERE =======================
 IMAGE="${IMAGE:-suryavikram6/chimera-eval:0.1.1}"  # Must already be loaded.
@@ -14,42 +14,42 @@ DOCKER_SOCKET="${DOCKER_SOCKET:-/var/run/docker.sock}"
 
 declare -A CONFIG=(
   # Models are already hosted. Use reachable internal URLs ending in /v1.
-  [MODEL_URL]="http://127.0.0.1:8000/v1"
-  [MODEL_NAME]="glimmer-eval"
-  [MODEL_CONTEXT]=131072
-  [JUDGE_URL]="http://127.0.0.1:8000/v1"
-  [JUDGE_NAME]="glimmer-eval"
+  [MODEL_URL]="http://127.0.0.1:8025/v1"
+  [MODEL_NAME]="judge"
+  [MODEL_CONTEXT]=32768
+  [JUDGE_URL]="http://127.0.0.1:8025/v1"
+  [JUDGE_NAME]="judge"
   [JUDGE_CONTEXT]=131072
 
   # Independent token budgets. On one server, divide its capacity between roles.
-  [MODEL_KV_CACHE_NUM_TOKENS]=262144
-  [JUDGE_KV_CACHE_NUM_TOKENS]=131072
-  [MAX_PENDING]=128
+  [MODEL_KV_CACHE_NUM_TOKENS]=10000000
+  [JUDGE_KV_CACHE_NUM_TOKENS]=10000000
+  [MAX_PENDING]=1024
 
-  # Quick all-domain default: one prompt per task, one response per prompt.
-  # Full inventory: LIMIT_PER_TASK=0. For pass@2: N_SAMPLES=2 and PASS_K="1,2".
+  # Diagnostic run: up to 50 prompts per task, 4 responses each, pass@1 and pass@4.
+  # Full inventory: LIMIT_PER_TASK=0. PASS_K values must be <= N_SAMPLES.
   [SPLIT]="main_test"
   [TASKS]=""                          # Blank = all; e.g. "gsm8k,math500,humanevalplus"
-  [LIMIT_PER_TASK]=1
+  [LIMIT_PER_TASK]=50
   [TASK_SAMPLE_COUNTS_JSON]='{}'        # All frozen counts; e.g. {"gsm8k":50}
-  [N_SAMPLES]=1
-  [PASS_K]="1"
+  [N_SAMPLES]=4
+  [PASS_K]="1,4"
   [SEED]=42
   [EVAL_CONTEXT_BUCKETS]=""            # Blank = all fitting; e.g. "4096,8192,16384"
 
   # Sampling and model-specific reasoning options. Use '{}' for other templates.
-  [MODEL_TEMPERATURE]=0.6
+  [MODEL_TEMPERATURE]=1
   [MODEL_TOP_P]=0.95
-  [MODEL_TOP_K]=-1
+  [MODEL_TOP_K]=20
   [MODEL_REPETITION_PENALTY]=1.0
   [MODEL_MIN_P]=0.0
   [MODEL_PRESENCE_PENALTY]=0.0
   [MODEL_FREQUENCY_PENALTY]=0.0
   [MODEL_CHAT_TEMPLATE_KWARGS]='{"reasoning_strength":"high"}'
   [MODEL_STOP_JSON]='[]'
-  [JUDGE_TEMPERATURE]=0.0
-  [JUDGE_TOP_P]=1.0
-  [JUDGE_TOP_K]=-1
+  [JUDGE_TEMPERATURE]=1
+  [JUDGE_TOP_P]=0.95
+  [JUDGE_TOP_K]=20
   [JUDGE_REPETITION_PENALTY]=1.0
   [JUDGE_MIN_P]=0.0
   [JUDGE_PRESENCE_PENALTY]=0.0
@@ -59,7 +59,7 @@ declare -A CONFIG=(
 
   # Response ceilings: global > task > domain > frozen row. Never truncate inputs.
   [MAX_NEW_TOKENS]=0
-  [TASK_MAX_TOKENS_JSON]='{"gsm8k":8192,"math500":32768,"arc":4096,"mmlu_pro":8192,"triviaqa":4096,"hotpot":4096,"biggen":16384,"humanevalplus":16384}'
+  [TASK_MAX_TOKENS_JSON]='{"gsm8k":1024,"math500":2048,"arc":1024,"mmlu_pro":1024,"triviaqa":1024,"hotpot":1024,"biggen":2048,"humanevalplus":2048}'
   [DOMAIN_MAX_TOKENS_JSON]='{}'
   [JUDGE_MAX_TOKENS]=8192
   [JUDGE_MAX_RETRY_TOKENS]=16384
@@ -68,6 +68,7 @@ declare -A CONFIG=(
   [REQUEST_RETRIES]=2
   [CODE_TIMEOUT]=15
   [CODE_CONCURRENCY]=2
+  [PROGRESS_SECONDS]=30               # One status line per interval, not one per sample.
 
   # Legacy limits, used only when the corresponding token budget is zero.
   [MODEL_CONCURRENCY]=16
@@ -118,6 +119,7 @@ args=(run --rm --pull=never --init --network host --workdir /repo
   --name "$CONTAINER_NAME"
   -v "$CODE_PATH:/repo:ro" -v "$DATA_PATH:/data:ro" -v "$OUTPUT_PATH:/results"
   -v "$DOCKER_SOCKET:/var/run/docker.sock"
+  --ulimit nofile=65536:65536
   -e EVAL_ROOT=/repo -e DATA_DIR=/data -e OUTPUT_DIR=/results -e PYTHON_BIN=python3
   -e "RUN_NAME=$RUN_NAME" -e "CODE_IMAGE=$CODE_IMAGE"
   -e HF_HUB_OFFLINE=1 -e HF_DATASETS_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1)
