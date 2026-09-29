@@ -5,6 +5,7 @@ import collections
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -74,6 +75,164 @@ def instruction_checks(text, ids, kwargs, prompt):
     return checks
 
 
+THINK_OPEN, THINK_CLOSE = '<think>', '</think>'
+
+
+def answer_text(text):
+    """The graded answer, or None when there is none. The policy is a non-thinking instruct model
+    that still sometimes writes <think>...</think>; the tags must not cost reward. The answer is what
+    follows the last closed block. Reasoning that never closes, or closes with nothing after it, is an
+    unfinished response: like a truncated one it is masked in training, never rewarded or punished."""
+    tail = text.rsplit(THINK_CLOSE, 1)[1] if THINK_CLOSE in text else text
+    if THINK_OPEN in tail or (THINK_CLOSE in text and not tail.strip()):
+        return None
+    return tail
+
+
+# The two final-answer formats MCQA prompts request (one per row). A correct answer in the
+# other explicit format earns partial credit; the strict pass verdict stays False.
+MCQA_FORMATS = (r'Answer\s*:\s*(?!Answer)\s*([A-Za-z0-9])\s*', r'\\boxed\{\s*([A-Za-z0-9])\s*\}')
+OTHER_FORMAT_CREDIT = 0.5
+
+SCALAR_TYPES = {'string', 'integer', 'number', 'boolean', 'null'}
+
+
+def parse_structured(candidate, fmt, schema):
+    """Parse one candidate in the requested format; CSV cells follow the schema's types."""
+    if fmt == "json":
+        return json.loads(candidate)
+    if fmt == "yaml":
+        import yaml
+        return yaml.safe_load(candidate)
+    if fmt == "xml":
+        from defusedxml.ElementTree import fromstring
+        return fromstring(candidate)
+    if fmt == "toml":
+        import tomllib
+        return tomllib.loads(candidate)
+    import csv
+    import io
+    rows = list(csv.DictReader(io.StringIO(candidate), strict=True))
+    if not rows:
+        raise ValueError("empty CSV")
+    return csv_value(rows, schema) if schema else rows
+
+
+def _scalar(prop):
+    kinds = prop.get('type')
+    kinds = set(kinds if isinstance(kinds, list) else [kinds]) - {None}
+    return kinds <= SCALAR_TYPES and 'properties' not in prop and 'items' not in prop
+
+
+def quarantine_reason(row):
+    """Why no response can ever pass this row, or None. Such rows only burn compute and
+    deflate eval, so they are excluded before training like other invalid metadata."""
+    meta = row.get('verification', {})
+    if row['verifier'] != 'structure' or not meta.get('schema'):
+        return None
+    fmt, schema = meta['format'].lower(), meta['schema']
+    if fmt == 'toml' and schema.get('type', 'object') != 'object':
+        return 'TOML top level is always a table; schema requires ' + str(schema.get('type'))
+    if fmt == 'csv':
+        item = schema.get('items', {}) if schema.get('type') == 'array' else schema
+        if item.get('type') != 'object' or not all(_scalar(p) for p in item.get('properties', {}).values()):
+            return 'CSV cannot express nested or non-scalar schema fields'
+    return None
+
+
+def _parses_json(candidate):
+    try:
+        json.loads(candidate)
+        return True
+    except ValueError:
+        return False
+
+
+def csv_value(rows, schema):
+    """CSV cells are strings: convert them to the schema's scalar types; one row may be the object."""
+    item = schema.get('items', {}) if schema.get('type') == 'array' else schema
+    props = item.get('properties', {})
+    def convert(value, prop):
+        kinds = prop.get('type')
+        for kind in (kinds if isinstance(kinds, list) else [kinds]):
+            try:
+                if kind == 'integer':
+                    return int(value)
+                if kind == 'number':
+                    return float(value)
+            except ValueError:
+                continue
+            if kind == 'boolean' and value.strip().lower() in ('true', 'false'):
+                return value.strip().lower() == 'true'
+            if kind == 'null' and value.strip().lower() in ('', 'null', 'none'):
+                return None
+            if kind == 'string':
+                return value
+        return value
+    rows = [{k: convert(v, props.get(k, {})) if isinstance(v, str) else v for k, v in r.items()} for r in rows]
+    return rows[0] if schema.get('type') == 'object' and len(rows) == 1 else rows
+
+
+def structured_candidates(text, fmt):
+    """Where the data may be, most final first: fenced blocks (last first), then the whole response,
+    then for JSON each value embedded in prose (last first). Explanation around the data is allowed;
+    the grader uses the first candidate that parses, so the last answer given is the one that counts."""
+    blocks = re.findall(r'```[^\n`]*\n(.*?)\n?```', text, re.S)
+    seen = list(reversed(blocks)) + [text]
+    if fmt == 'json':
+        decoder, spans, i = json.JSONDecoder(), [], 0
+        while i < len(text):
+            if text[i] in '{[':
+                try:
+                    _, end = decoder.raw_decode(text, i)
+                    spans.append(text[i:end])
+                    i = end
+                    continue
+                except ValueError:
+                    pass
+            i += 1
+        seen += reversed(spans)
+    unique = []
+    for candidate in seen:
+        if candidate.strip() and candidate not in unique:
+            unique.append(candidate)
+    return unique
+
+
+# How grade() can reach the judge for a row, ordered from never to every answer.
+# none: never. on_miss: only after the deterministic check fails.
+# to_pass: deterministic checks can only fail an answer; passing needs the judge.
+# always: every non-empty, non-truncated answer. Keep in step with grade().
+JUDGE_USES = ('none', 'on_miss', 'to_pass', 'always')
+
+
+NCHALLENGE_MARKER = "Does the model's final response satisfy this criterion?"
+
+
+def rubric_question(content):
+    """Nemotron multichallenge checks embed the conversation and the expected verdict. The judge gets
+    the conversation once, completed with the candidate, and pass_criteria is applied by the grader,
+    so neither is repeated in the question (the expected verdict would anchor the judge)."""
+    if NCHALLENGE_MARKER not in content:
+        return content
+    return re.sub(r'\s*Expected answer: (YES|NO)\s*$', '', NCHALLENGE_MARKER + content.split(NCHALLENGE_MARKER, 1)[1])
+
+
+def judge_use(row):
+    kind = row['verifier']
+    if kind in ('math', 'choice', 'instruction', 'retrieval', 'calendar', 'humanevalplus', 'apps'):
+        return 'none'
+    if kind == 'exact':
+        return 'on_miss' if row.get('domain') == 'logic' else 'none'
+    if kind == 'alias':
+        return 'on_miss'
+    if kind == 'structure':
+        return 'to_pass'
+    if kind in ('grounded', 'equivalence', 'quality', 'rubric'):
+        return 'always'
+    raise GradingError('Unimplemented verifier: ' + kind)
+
+
 class Grader:
     def __init__(self, judge=None, judge_max_tokens=8192, judge_context=32768,
                  code_image="suryavikram6/chimera-eval:0.1.1", code_timeout=15, code_concurrency=2,
@@ -139,6 +298,16 @@ class Grader:
         raise GradingError("Invalid judge output; " + "; ".join(errors))
 
     def grade(self, row, response):
+        answer = answer_text(response['text'])
+        if answer is None and response.get('finish_reason') == 'stop':
+            return result(0, False if row.get('binary', True) else None, failure='unfinished_reasoning',
+                          incomplete=True, reasoning_tags=True)
+        graded = self._grade(row, dict(response, text=response['text'] if answer is None else answer))
+        if THINK_OPEN in response['text'] or THINK_CLOSE in response['text']:
+            graded = dict(graded, components=dict(graded.get('components', {}), reasoning_tags=True))
+        return graded
+
+    def _grade(self, row, response):
         text = response["text"]
         meta = row.get("verification", {})
         kind = row["verifier"]
@@ -165,8 +334,17 @@ class Grader:
                     len(set(meta['labels'])) != len(meta['labels']) or len(meta['labels']) < 2):
                 raise GradingError('Invalid MCQA gold/options; quarantine instead of scoring the candidate')
             # One explicit final label, never first letter anywhere in reasoning.
-            match = re.fullmatch(r"\s*[([]?([A-Z0-9]+)[)\].]?\s*", final)
-            chosen = match.group(1) if match else None
+            def label(span):
+                match = re.fullmatch(r"\s*[([]?([A-Z0-9]+)[)\].]?\s*", span)
+                return match.group(1) if match else None
+            chosen = label(final)
+            if chosen not in meta['labels'] and meta.get('output_regex') in MCQA_FORMATS:
+                other = next(f for f in MCQA_FORMATS if f != meta['output_regex'])
+                alternative = label(extract_final(text, {'output_regex': other}))
+                if alternative in meta['labels']:
+                    correct = alternative == str(meta['answer'])
+                    return result(OTHER_FORMAT_CREDIT if correct else 0, False, extracted=alternative,
+                                  requested_format=False)
             passed = chosen in meta["labels"] and chosen == str(meta["answer"])
             return result(passed, passed, extracted=chosen)
         if kind in ("alias", "grounded"):
@@ -212,8 +390,10 @@ class Grader:
             if not checks:
                 raise GradingError("Empty rubric")
             verdicts, raw = [], []
+            # The judge reads the completed conversation once, the candidate as its final turn.
+            conversation = row["messages"] + [{"role": "assistant", "content": text}]
             for check in checks:
-                j = self.judge_json({"question": check["content"], "task": row["messages"], "response": text})
+                j = self.judge_json({"question": rubric_question(check["content"]), "conversation": conversation})
                 passed = j["verdict"] == (check.get("pass_criteria", "YES") == "YES")
                 if check.get("source") == "user" and check.get("is_misalignment_check"):
                     passed = not passed
@@ -229,41 +409,33 @@ class Grader:
             import csv
             from xml.etree.ElementTree import ParseError
             from defusedxml.common import DefusedXmlException
-            fmt = meta["format"].lower()
-            fenced = re.fullmatch(r'\s*```(?:json|yaml|yml|xml|csv|toml)?\s*\n(.*?)\n```\s*', text, re.S)
-            if fenced:
-                text = fenced.group(1)
-            try:
-                if fmt == "json":
-                    obj = json.loads(text)
-                elif fmt == "yaml":
-                    import yaml
-                    obj = yaml.safe_load(text)
-                elif fmt == "xml":
-                    from defusedxml.ElementTree import fromstring
-                    obj = fromstring(text)
-                elif fmt == "toml":
-                    import tomllib
-                    obj = tomllib.loads(text)
-                elif fmt == "csv":
-                    import csv, io
-                    obj = list(csv.DictReader(io.StringIO(text), strict=True))
-                    if not obj:
-                        raise ValueError("empty CSV")
-                else:
-                    raise GradingError("Unsupported structure format: " + fmt)
-                if meta.get("schema"):
-                    import jsonschema
-                    try:
-                        jsonschema.validate(obj, meta["schema"])
-                    except jsonschema.ValidationError as e:
-                        return result(0, False, schema=False, reason=e.message)
-            except (ValueError, TypeError, yaml.YAMLError, ParseError, DefusedXmlException, csv.Error) as e:
-                return result(0, False, syntax=False, reason=str(e))
+            import jsonschema
+            fmt, schema = meta["format"].lower(), meta.get("schema")
+            if fmt not in ("json", "yaml", "xml", "toml", "csv"):
+                raise GradingError("Unsupported structure format: " + fmt)
+            syntax_errors = (ValueError, TypeError, yaml.YAMLError, ParseError, DefusedXmlException, csv.Error)
+            chosen, obj, error = None, None, 'no structured content'
+            for candidate in structured_candidates(text, fmt):
+                try:
+                    obj = parse_structured(candidate, fmt, schema)
+                except syntax_errors as e:
+                    error = error if error != 'no structured content' else str(e)
+                    continue
+                chosen = candidate
+                break
+            if chosen is None:
+                return result(0, False, syntax=False, reason=error)
+            if schema:
+                try:
+                    jsonschema.validate(obj, schema)
+                except jsonschema.ValidationError as e:
+                    return result(0, False, schema=False, reason=e.message)
+            # Explanation around the data is fine: the judge checks the extracted data itself.
             check = self.judge_json({"question": "Does the response satisfy ALL requested structural features and correctly preserve/extract required facts? Check values, not only keys. No unsupported invented content.",
-                                     "task": row["messages"], "response": text,
+                                     "task": row["messages"], "response": chosen,
                                      "requirements": meta.get("requirements", [])})
-            return result(check["verdict"], check["verdict"], syntax=True, content=check)
+            return result(check["verdict"], check["verdict"], syntax=True, content=check,
+                          extracted_from_prose=chosen.strip() != text.strip())
         if kind == "retrieval":
             targets = meta["targets"]
             # RULER native recall uses containment; strict all-target uses the same target matching.
@@ -274,11 +446,57 @@ class Grader:
             return result(passed, passed, recall=sum(checks) / len(checks))
         if kind == 'calendar':
             from .calendar import verify
-            passed = verify(text, meta['calendar'])
-            return result(passed, passed)
+            # The calendar may come with explanation; the last JSON value given is the final calendar.
+            final_calendar = next((c for c in structured_candidates(text, 'json') if _parses_json(c)), text)
+            passed = verify(final_calendar, meta['calendar'])
+            return result(passed, passed, extracted_from_prose=final_calendar.strip() != text.strip())
         if kind in ("humanevalplus", "apps"):
             return self.execute_code(row, text)
         raise GradingError("Unimplemented verifier: " + kind)
+
+    def self_check(self, rows):
+        """Run each task's non-judge grading machinery once; {task: error} for tasks that cannot be graded.
+
+        Surfaces missing packages, checker data or the code sandbox before training starts,
+        instead of on the first sampled row. The judge is checked separately.
+        """
+        errors, passed = {}, set()
+        for row in rows:
+            task, kind, meta = row['task'], row['verifier'], row.get('verification', {})
+            if task in errors:
+                continue
+            keys = [kind] + (['regex'] if meta.get('output_regex') else [])
+            if kind == 'instruction':
+                keys += [('instruction', ident) for ident in meta['ids']]
+            for key in keys:
+                if key in passed:
+                    continue
+                try:
+                    self._check(key, row)
+                except Exception as e:
+                    detail = (str(e).strip().splitlines() or [''])[-1]  # subprocess errors carry a traceback
+                    errors[task] = f"{type(e).__name__}: {detail} (row {row['id'][:12]})"
+                    break
+                passed.add(key)
+        return errors
+
+    def _check(self, key, row):
+        meta = row['verification']
+        if key == 'regex':
+            import regex  # noqa: F401  pinned output_regex extraction
+        elif key == 'math':
+            self.grade(row, {'text': '\\boxed{' + str(meta['answer']) + '}', 'finish_reason': 'stop'})
+        elif isinstance(key, tuple):
+            index = meta['ids'].index(key[1])
+            instruction_checks('x', [key[1]], [meta['kwargs'][index]], row['messages'][-1]['content'])
+        elif key == 'structure':
+            import yaml, jsonschema, defusedxml.ElementTree  # noqa: F401
+        elif key in ('apps', 'humanevalplus'):
+            if not shutil.which('docker'):
+                raise GradingError('docker CLI not found; the code sandbox cannot run')
+            probe = subprocess.run(['docker', 'image', 'inspect', self.code_image], capture_output=True, timeout=30)
+            if probe.returncode:
+                raise GradingError('Sandbox image not available locally: ' + self.code_image)
 
     def execute_code(self, row, text):
         code_blocks = re.findall(r"```(?:python|py)?\s*\n(.*?)```", text, re.S)

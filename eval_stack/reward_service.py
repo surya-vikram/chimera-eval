@@ -2,6 +2,9 @@
 
 No model hosting and no caller-supplied gold/rubrics. Run one instance per cache
 directory. Only immutable rl_train/rl_val records are available to this service.
+/health reports whether the judge is reachable, which tasks can call it, and tasks
+whose non-judge grading machinery failed its startup check; the trainer refuses to
+start any enabled task that cannot be graded.
 """
 import argparse
 import fcntl
@@ -12,10 +15,11 @@ import math
 from pathlib import Path
 from socketserver import ThreadingMixIn
 import threading
+import urllib.request
 
 from .client import Client
 from .common import digest, read_jsonl, validate_record, write_json
-from .graders import Grader
+from .graders import JUDGE_USES, Grader, judge_use, quarantine_reason
 from .runner import settings
 
 
@@ -31,6 +35,7 @@ class RewardStore:
         fcntl.flock(self.lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
         self.rows = {}
         self.excluded_rows = {}
+        self.task_judge = {}
         manifest = json.loads((Path(data_dir) / 'manifest.json').read_text())
         for split in ('rl_train', 'rl_val'):
             rows = [validate_record(r) for r in read_jsonl(Path(data_dir) / 'splits' / f'{split}.jsonl')]
@@ -41,6 +46,11 @@ class RewardStore:
                 if key in self.rows:
                     raise ValueError('Duplicate row identity')
                 self.rows[key] = row
+                # Strongest judge use over a task's rows, reported to the trainer.
+                self.task_judge[row['task']] = max(self.task_judge.get(row['task'], 'none'),
+                                                   judge_use(row), key=JUDGE_USES.index)
+                if quarantine_reason(row):
+                    self.excluded_rows[row['id']] = quarantine_reason(row)
                 if row['verifier'] == 'choice':
                     # Validate extraction against canonical correct outputs before
                     # any policy receives a reward. Published v2 MCQA contains an
@@ -59,6 +69,7 @@ class RewardStore:
         self.protocol_id = digest({'manifest': manifest, 'protocol': protocol, 'code': source_hash,
                                    'excluded_rows': self.excluded_rows})
         self.grader = grader
+        self.task_errors = grader.self_check([r for r in self.rows.values() if r['id'] not in self.excluded_rows])
         self.guard = threading.Lock()
         self.active = {}
         self.directory = self.cache / self.protocol_id
@@ -69,6 +80,18 @@ class RewardStore:
 
     def close(self):
         self.lock_file.close()
+
+    def judge_status(self):
+        """Live, bounded probe: a slow or absent judge must not stall /health."""
+        judge = getattr(self.grader, 'judge', None)
+        if judge is None:
+            return {'model': None, 'ready': False}
+        try:
+            with urllib.request.urlopen(judge.url + '/models', timeout=5) as response:
+                ready = judge.model in [m['id'] for m in json.load(response)['data']]
+        except (OSError, ValueError, KeyError, TypeError):
+            ready = False
+        return {'model': judge.model, 'ready': ready}
 
     def grade(self, request):
         if set(request) != {'request_id', 'protocol_id', 'split', 'row_id', 'row_hash', 'response'}:
@@ -171,7 +194,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != '/health':
             self.reply(404, {'error': 'Unknown route'})
             return
-        self.reply(200, {'protocol_id': self.server.store.protocol_id, 'status': 'ready'})
+        store = self.server.store
+        self.reply(200, {'protocol_id': store.protocol_id, 'status': 'ready', 'judge': store.judge_status(),
+                         'task_judge': store.task_judge, 'task_errors': store.task_errors})
 
     def do_POST(self):
         if self.path != '/score':
@@ -204,22 +229,24 @@ def main():
     c = settings()
     from .token_budget import TokenBudget
     capacity = c['JUDGE_KV_CACHE_NUM_TOKENS']
+    # The judge may be down: tasks that never call it still score, and the trainer
+    # refuses to start any enabled task that needs it while /health reports it unreachable.
     judge = Client(c['JUDGE_URL'], c['JUDGE_NAME'], c['JUDGE_SAMPLING'],
                    c['MAX_PENDING'] if capacity else c['JUDGE_CONCURRENCY'],
                    timeout=c['REQUEST_TIMEOUT'], retries=c['REQUEST_RETRIES'],
                    token_budget=TokenBudget(capacity) if capacity else None)
-    if c['JUDGE_NAME'] not in [m['id'] for m in judge.request('/models')['data']]:
-        raise ValueError('Configured judge model is not served')
-    judge_keys = {k: v for k, v in c.items() if k.startswith('JUDGE_') or k.startswith('CODE_')
-                  or k.startswith('REQUEST_')}
-    judge_keys['revision'] = args.judge_revision
+    protocol = {k: v for k, v in c.items() if k.startswith('JUDGE_') or k.startswith('CODE_')
+                or k.startswith('REQUEST_')}
+    protocol['revision'] = args.judge_revision
     grader = Grader(judge, c['JUDGE_MAX_TOKENS'], c['JUDGE_CONTEXT'], c['CODE_IMAGE'],
                     c['CODE_TIMEOUT'], c['CODE_CONCURRENCY'],
                     judge_audit_dir=Path(args.cache_dir) / 'judge_attempts',
                     judge_attempts=c['JUDGE_ATTEMPTS'], judge_max_retry_tokens=c['JUDGE_MAX_RETRY_TOKENS'])
-    store = RewardStore(args.data_dir, args.cache_dir, grader, judge_keys)
+    store = RewardStore(args.data_dir, args.cache_dir, grader, protocol)
     server = RewardServer((args.host, args.port), store, args.workers)
-    print(json.dumps({'address': server.server_address, 'protocol_id': store.protocol_id}), flush=True)
+    print(json.dumps({'address': server.server_address, 'protocol_id': store.protocol_id,
+                      'judge': store.judge_status(), 'task_judge': store.task_judge,
+                      'task_errors': store.task_errors}), flush=True)
     try:
         server.serve_forever()
     finally:
