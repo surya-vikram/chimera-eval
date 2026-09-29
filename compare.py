@@ -4,9 +4,9 @@
     python3 compare.py outputs                 # writes outputs/comparison.csv
     python3 compare.py outputs -o models.csv
 
-Columns: run, model_path (from the run's saved launch settings), aggregate score and pass@k,
-the score of every domain, pass@k of every domain, then model and judge names and the
-selection and sampling settings. Scores are percentages. A value the run does not have
+Columns: model_path (from the run's saved launch settings), aggregate score and pass@k, the
+score of every domain, pass@k of every domain, then model and judge names, the selection
+and sampling settings, and the run folder. Scores are percentages. A value the run does not have
 (a domain it did not evaluate, a k it did not request, pass@k for quality) is left empty.
 Standard library only.
 """
@@ -59,7 +59,8 @@ def summarize(run):
         for k, v in ((k, [d['pass'][k] for d in scored if d.get('pass', {}).get(k) is not None]) for k in ks)}
     sampling = config.get('MODEL_SAMPLING', {})
     row = {'run': run.name,
-           'model_path': launch.get('MODEL_PATH', ''),
+           # Runs launched before MODEL_PATH existed are identified by the served model name.
+           'model_path': launch.get('MODEL_PATH') or config.get('MODEL_NAME', launch.get('MODEL_NAME', '')),
            'model_name': config.get('MODEL_NAME', launch.get('MODEL_NAME', '')),
            'judge_name': config.get('JUDGE_NAME', launch.get('JUDGE_NAME', '')),
            'split': config.get('SPLIT', ''), 'tasks': config.get('TASKS', '') or 'all',
@@ -80,14 +81,14 @@ def summarize(run):
 
 
 def columns(rows):
-    """Run and model, aggregate score and pass@k, the ten domain scores side by side, domain
-    pass@k (k in numeric order), then the settings and diagnostics of each run."""
+    """model_path, aggregate score and pass@k, the ten domain scores side by side, domain
+    pass@k (k in numeric order), then settings and diagnostics; the run folder comes last."""
     ks = sorted({key.split('@')[1] for r in rows for key in r if '@' in key}, key=int)
-    lead = ['run', 'model_path', 'aggregate_score', *(f'aggregate_pass@{k}' for k in ks)]
+    lead = ['model_path', 'aggregate_score', *(f'aggregate_pass@{k}' for k in ks)]
     scores = [f'{d}_score' for d in DOMAINS]
     passes = [f'{d}_pass@{k}' for d in DOMAINS for k in ks]
-    rest = [k for k in rows[0] if k not in lead and k not in scores and '@' not in k]
-    return lead + scores + passes + rest
+    rest = [k for k in rows[0] if k not in lead and k not in scores and '@' not in k and k != 'run']
+    return lead + scores + passes + rest + ['run']
 
 
 def compare(outputs, destination=None):
@@ -116,13 +117,13 @@ def main():
     short = {'knowledge': 'know', 'grounding': 'ground', 'quality': 'qual', 'instruction': 'instr',
              'multiturn': 'multi', 'structure': 'struct', 'long_context': 'long'}
     fmt = lambda v: '' if v in (None, '') else f'{v:.1f}'
-    header = ['#', 'run', 'model', 'aggregate', *(f'pass@{k}' for k in ks), *(short.get(d, d) for d in DOMAINS)]
-    table = [[str(i), r['run'], Path(r['model_path']).name if r['model_path'] else r['model_name'],
+    header = ['#', 'model_path', 'aggregate', *(f'pass@{k}' for k in ks), *(short.get(d, d) for d in DOMAINS)]
+    table = [[str(i), r['model_path'],
               fmt(r['aggregate_score']), *(fmt(r.get(f'aggregate_pass@{k}')) for k in ks),
               *(fmt(r[f'{d}_score']) for d in DOMAINS)] for i, r in enumerate(rows, 1)]
     widths = [max(len(x) for x in col) for col in zip(header, *table)]
     for line in [header, *table]:
-        print('  '.join(v.ljust(w) if i in (1, 2) else v.rjust(w) for i, (v, w) in enumerate(zip(line, widths))))
+        print('  '.join(v.ljust(w) if i == 1 else v.rjust(w) for i, (v, w) in enumerate(zip(line, widths))))
     print(f'\nScores in %; empty = not evaluated. {len(rows)} runs -> {destination}')
 
 

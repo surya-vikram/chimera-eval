@@ -33,7 +33,7 @@ class CompareTests(unittest.TestCase):
             (root / 'unfinished').mkdir()
             rows, out = compare.compare(root)
             table = list(csv.DictReader(out.read_text().splitlines()))
-            self.assertEqual([r['run'] for r in table], ['strong', 'weak'])
+            self.assertEqual([r['model_path'] for r in table], ["/models/it's strong", '/models/weak'])
             self.assertEqual(table[0]['model_path'], "/models/it's strong")
             self.assertEqual(table[0]['aggregate_score'], '90.0')
             self.assertEqual(table[0]['aggregate_pass@4'], '90.0')
@@ -42,8 +42,9 @@ class CompareTests(unittest.TestCase):
             self.assertEqual(table[1]['quality_pass@2'], '')     # quality has no pass@k
             self.assertEqual(table[0]['python_score'], '')       # domain not evaluated
             header = list(table[0])
-            self.assertEqual(header[:5], ['run', 'model_path', 'aggregate_score', 'aggregate_pass@1', 'aggregate_pass@2'])
-            self.assertEqual(header[6:16], [d + '_score' for d in compare.DOMAINS])
+            self.assertEqual(header[:4], ['model_path', 'aggregate_score', 'aggregate_pass@1', 'aggregate_pass@2'])
+            self.assertEqual(header[5:15], [d + '_score' for d in compare.DOMAINS])
+            self.assertEqual(header[-1], 'run')
             self.assertEqual(table[0]['math_score'], '90.0')
 
     def test_model_path_from_saved_run_script(self):
@@ -52,6 +53,8 @@ class CompareTests(unittest.TestCase):
             run(root, 'r', 50., [1], {'math': .5})
             (root / 'r' / 'run_eval.sh').write_text('  [MODEL_PATH]="/models/x"  # weights\n  [N_SAMPLES]=4\n')
             self.assertEqual(compare.compare(root)[0][0]['model_path'], '/models/x')
+            (root / 'r' / 'run_eval.sh').unlink()
+            self.assertEqual(compare.compare(root)[0][0]['model_path'], 'r')  # falls back to the model name
 
 
 if __name__ == '__main__':

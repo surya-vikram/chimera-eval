@@ -118,7 +118,8 @@ python3 compare.py outputs            # writes outputs/comparison.csv
 
 One row per finished run, highest aggregate first: `model_path` (from the run's saved
 launch settings), aggregate score and pass@k, the ten domain scores side by side, pass@k
-for each domain, then model and judge names and selection and sampling settings. Scores
+for each domain, then model and judge names, selection and sampling settings, and the
+run folder. Scores
 are percentages. The terminal shows the same ranking with the domain scores. Cells a
 run does not have (a domain it skipped, a k it did not request, quality pass@k) are
 empty. It needs only Python 3's standard library.
