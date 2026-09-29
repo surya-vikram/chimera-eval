@@ -1,5 +1,35 @@
 # Scoring, truncation, and future RL integration contract
 
+## Answer format policy — 2026-09-29
+
+The owner's intent: **"If the prompt explicitly asked for something, grade it strictly. If it
+didn't, don't fail the model over presentation. A better-behaved model follows explicit
+instructions exactly, and it shouldn't learn that bold text or a bulleted list is punished when
+nobody asked it to avoid them."** Also: do not over-penalize.
+
+The same graders produce MixRL rewards and evaluation scores, so this applies to both.
+
+| Response | Result |
+|---|---|
+| Markdown emphasis, lists, headings, code fences around the answer | No effect |
+| `Answer: X` where `Final answer: X` was asked (near-miss wording) | Accepted |
+| Extra text around a correctly formatted answer, including where the prompt says "only …" or "end with …" (explanation after the final line or the box, reasoning before `label: N`, a sentence around requested JSON or a calendar, a usage-example code block) | Accepted |
+| The format the prompt explicitly asked for is missing (no `Final answer:` line, no `\boxed{}` when asked, no python code block when asked) | Fails, reported as `format missing: …` |
+| Two `\boxed{}` in math; hedging between options (`B or C`) | Fails (unchanged) |
+| MCQA answer in the other explicit format | 0.5 (unchanged) |
+
+Answers are extracted whole: `\boxed{}` matches braces to any depth, and bracketed formats such
+as `(Answer: X)` or `((X))` match brackets, so answers containing `\(x\)` or `iron(III)` are not
+cut. `tests/test_format_policy.py` pins each rule.
+
+On 2026-09-29 all 90,757 rows of the frozen `rl_train`, `rl_val` and `main_test` splits (dataset
+v4) were graded with a correct answer built from each reference and its presentation variants.
+`main_test` holds the policy on every row. Rows no response can pass are excluded before training
+and evaluation, as before: structured rows whose schema contradicts itself (a required field that
+`additionalProperties: false` forbids, a `const`/`enum` outside the declared type, a broken `$ref`)
+are now quarantined too (67 rows), and APPS rows without a passing reference stay excluded by the
+MixRL code audit.
+
 ## Superseding decision — 2026-09-25
 
 Evaluation now uses **fixed_budget_v1**: capped candidate trajectories receive zero,

@@ -1,4 +1,21 @@
-"""One task-aware grader for reward and evaluation; native metrics stay explicit."""
+"""One task-aware grader for reward and evaluation; native metrics stay explicit.
+
+Answer format policy (the owner's intent, 2026-09-29): "If the prompt explicitly asked for
+something, grade it strictly. If it didn't, don't fail the model over presentation. A
+better-behaved model follows explicit instructions exactly, and it shouldn't learn that bold
+text or a bulleted list is punished when nobody asked it to avoid them." Also: do not
+over-penalize. Applied as:
+  * Presentation never costs reward: markdown emphasis, lists, headings, code fences.
+  * Near-miss wording counts: "Answer: X" where "Final answer: X" was asked.
+  * Extra text around a correctly formatted answer is allowed, also where the prompt says
+    "only ..." or "end with ...": explanation after the final line or the box, reasoning
+    before "label: N", a sentence around requested JSON or a calendar, usage-example code blocks.
+  * A response without the format the prompt explicitly asked for fails ("format missing: ..."):
+    no "Final answer:" line, no \\boxed{} when asked, no python code block when asked.
+  * Kept from earlier decisions: exactly one \\boxed{} for math; MCQA 0.5 for the other
+    explicit format; hedging between options ("B or C") fails.
+tests/test_format_policy.py pins each rule; the full-data audit checked it on every row.
+"""
 from __future__ import annotations
 
 import collections
@@ -44,18 +61,107 @@ def answer_metrics(text, aliases):
     return em, f1
 
 
+# A "Final answer:" or "Answer:" line, also inside markdown (**Final answer:** X, - Answer: X).
+FINAL_MARK = re.compile(r"(?:^|\n)[ \t>#*_-]*(?:final answer|answer)[ \t*_]*:", re.I)
+
+
+def unemphasize(value):
+    """Drop markdown emphasis wrapped around an answer value (**D**, `42`, **D**.); it is presentation.
+    Characters inside the answer are kept: x**2 or a__b are content."""
+    value = value.strip()
+    while True:
+        m = re.fullmatch(r"(\*\*|__|\*|`)(.+?)\1([.,;!]?)", value, re.S)
+        if not m:
+            return value.strip("*`").strip() if re.fullmatch(r"[*`]*[^*`]*[*`]*", value) else value
+        value = (m.group(2) + m.group(3)).strip()
+
+
+def final_answer_block(text):
+    """Everything after the last final-answer marker, or None when the response has none."""
+    marks = list(FINAL_MARK.finditer(text))
+    return text[marks[-1].end():] if marks else None
+
+
+def final_line(text):
+    """The value on the last final-answer line (or the line after a bare marker), else ''."""
+    lines = [line for line in (final_answer_block(text) or "").splitlines() if unemphasize(line)]
+    return unemphasize(lines[0]) if lines else ""
+
+
+# Answer formats that end with a closing bracket. Their lazy dataset regexes stop at the first
+# ")" or "]", which cuts answers containing brackets (\\(x^2\\), iron(III)); match brackets instead.
+DELIMITED = {r"\(Answer:\s*(.+?)\)": (r"\(Answer:\s*", 0, "()", False),
+             r"\[Answer:\s*(.+?)\]": (r"\[Answer:\s*", 0, "[]", False),
+             r"Answer is\s*\[(.+?)\]": (r"Answer is\s*\[", -1, "[]", False),
+             r"\(\((.*?)\)\)": (r"\(\(", 0, "()", True)}
+
+
+def last_delimited(text, opener, offset, pair, doubled):
+    """Content of the last answer wrapper whose brackets balance, or None."""
+    for m in reversed(list(re.finditer(opener, text))):
+        start = (m.end() if offset else m.start()) + offset
+        depth = 0
+        for end in range(start, len(text)):
+            depth += {pair[0]: 1, pair[1]: -1}.get(text[end], 0)
+            if depth == 0:
+                if doubled:
+                    if text[end - 1] == pair[1] and end - 1 > start + 1:
+                        return text[start + 2:end - 1].strip()
+                    break
+                return text[m.end():end].strip()
+    return None
+
+
 def extract_final(text, metadata):
     pattern = metadata.get("output_regex")
+    if pattern == BOXED:
+        return unemphasize(last_boxed(text))
+    if pattern in DELIMITED:
+        found = last_delimited(text, *DELIMITED[pattern])
+        if found is not None:
+            return unemphasize(found)
     if pattern:
         # Dataset regex is pinned trusted metadata, but bound input length.
         import regex
         matches = list(regex.finditer(pattern, text, flags=regex.DOTALL, timeout=1))
+        if not matches and pattern.endswith("$"):
+            # "Output only 'label: N'" rows: text after the label is allowed, the last label counts.
+            matches = list(regex.finditer(re.sub(r"(\\s\*)?\$$", "", pattern), text, flags=regex.DOTALL, timeout=1))
         if not matches:
             return ""
         m = matches[-1]
-        return (next((g for g in m.groups() if g), m.group(0))).strip()
-    matches = re.findall(r"(?:^|\n)\s*(?:Final answer|Answer)\s*:\s*(.+)", text, re.I)
-    return matches[-1].strip() if matches else text.strip()
+        return unemphasize(next((g for g in m.groups() if g), m.group(0)))
+    return final_line(text) or text.strip()
+
+
+def asks_final_line(row):
+    """The prompt says "End with 'Final answer: ...'"; a response without that line ignored it."""
+    return "End with 'Final answer:" in row["messages"][-1]["content"]
+
+
+# The \boxed{} pattern openqa and science rows carry, also used for rows whose prompt asks for a
+# box. It stops at two nested brace levels, so extraction matches braces instead (last_boxed).
+BOXED = r"\\boxed\{((?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*)\}"
+
+
+def last_boxed(text):
+    """Content of the last \\boxed{...}, braces matched to any depth; '' when there is none."""
+    start = text.rfind("\\boxed")
+    while start != -1:
+        brace = start + len("\\boxed")
+        while brace < len(text) and text[brace] in " \t":
+            brace += 1
+        if brace < len(text) and text[brace] == "{":
+            depth = 0
+            for end in range(brace, len(text)):
+                slashes = len(text[brace:end]) - len(text[brace:end].rstrip("\\"))
+                if slashes % 2:
+                    continue  # \\{ and \\} are literal braces in LaTeX; after \\\\ (a line break) they group
+                depth += {"{": 1, "}": -1}.get(text[end], 0)
+                if depth == 0:
+                    return text[brace + 1:end].strip()
+        start = text.rfind("\\boxed", 0, start)
+    return ""
 
 
 def instruction_checks(text, ids, kwargs, prompt):
@@ -124,6 +230,95 @@ def _scalar(prop):
     return kinds <= SCALAR_TYPES and 'properties' not in prop and 'items' not in prop
 
 
+JSON_TYPES = {'string': str, 'integer': int, 'number': (int, float), 'boolean': bool,
+              'array': list, 'object': dict, 'null': type(None)}
+
+
+def _has_type(value, kinds):
+    kinds = kinds if isinstance(kinds, list) else [kinds]
+    return any(isinstance(value, JSON_TYPES[k]) and not (k in ('integer', 'number') and isinstance(value, bool))
+               for k in kinds if k in JSON_TYPES)
+
+
+def schema_contradiction(schema):
+    """A reason no document can satisfy the schema, or None. Follows the parts every valid
+    document must contain (required fields, non-empty arrays, $refs) from the root and reports
+    what makes them impossible: a required field that additionalProperties: false forbids, a
+    const or every enum value outside the declared type, or a $ref that does not resolve."""
+    def resolve(ref):
+        if ref == '#':
+            return schema
+        node = schema
+        for part in ref[2:].split('/') if ref.startswith('#/') else [None]:
+            node = node.get(part) if isinstance(node, dict) and part is not None else None
+        return node if isinstance(node, dict) else None
+    def members(node, seen):
+        """The node and every allOf member it includes, $refs resolved."""
+        found = [node]
+        for part in node.get('allOf') or []:
+            if isinstance(part, dict) and '$ref' in part and part['$ref'] not in seen:
+                target = resolve(part['$ref'])
+                if target is not None:
+                    found += members(target, seen + (part['$ref'],))
+            elif isinstance(part, dict):
+                found += members(part, seen)
+        return found
+    def walk(node, depth=0, seen=()):
+        if not isinstance(node, dict) or depth > 32:
+            return None
+        if '$ref' in node:
+            if node['$ref'] in seen:
+                return None
+            target = resolve(node['$ref'])
+            return 'unresolvable $ref ' + node['$ref'] if target is None else walk(target, depth + 1, seen + (node['$ref'],))
+        kinds = node.get('type')
+        if kinds is not None and 'const' in node and not _has_type(node['const'], kinds):
+            return f"const {node['const']!r} is not of type {kinds}"
+        if kinds is not None and isinstance(node.get('enum'), list) and not any(_has_type(v, kinds) for v in node['enum']):
+            return f'no enum value is of type {kinds}'
+        for part in node.get('allOf') or []:
+            if isinstance(part, dict) and '$ref' in part and part['$ref'] not in seen and resolve(part['$ref']) is None:
+                return 'unresolvable $ref ' + part['$ref']
+        if kinds == 'object':
+            parts = members(node, seen)
+            props = node.get('properties') or {}
+            required = [k for m in parts for k in (m.get('required') or [])]
+            patterns = list(node.get('patternProperties') or {})
+            if node.get('additionalProperties') is False:
+                missing = [k for k in required if k not in props and not any(re.search(p, k) for p in patterns)]
+                if missing:
+                    return f'required field {missing[0]!r} is forbidden by additionalProperties: false'
+            for key in required:
+                reason = walk(next((m['properties'][key] for m in parts if key in (m.get('properties') or {})), None), depth + 1, seen)
+                if reason:
+                    return reason
+        if kinds == 'array' and node.get('minItems', 0) > 0:
+            return walk(node.get('items'), depth + 1, seen)
+        return None
+    def refs(node, seen):
+        """$refs a document can reach from the root through subschemas (not unused definitions)."""
+        if not isinstance(node, dict):
+            return
+        ref = node.get('$ref')
+        if isinstance(ref, str):
+            yield ref
+            target = resolve(ref)
+            if target is not None and ref not in seen:
+                yield from refs(target, seen | {ref})
+        for key in ('properties', 'patternProperties'):
+            for sub in (node.get(key) or {}).values():
+                yield from refs(sub, seen)
+        for key in ('items', 'additionalProperties', 'not', 'if', 'then', 'else', 'contains'):
+            yield from refs(node.get(key), seen)
+        for key in ('allOf', 'anyOf', 'oneOf', 'prefixItems'):
+            for sub in node.get(key) or []:
+                yield from refs(sub, seen)
+    # A broken $ref a document can reach, even on an optional field, turns every response
+    # that uses the field into a grading error rather than a score.
+    broken = next((r for r in refs(schema, frozenset()) if resolve(r) is None), None)
+    return 'unresolvable $ref ' + broken if broken else walk(schema)
+
+
 def quarantine_reason(row):
     """Why no response can ever pass this row, or None. Such rows only burn compute and
     deflate eval, so they are excluded before training like other invalid metadata."""
@@ -131,6 +326,9 @@ def quarantine_reason(row):
     if row['verifier'] != 'structure' or not meta.get('schema'):
         return None
     fmt, schema = meta['format'].lower(), meta['schema']
+    contradiction = schema_contradiction(schema)
+    if contradiction:
+        return 'Schema cannot be satisfied: ' + contradiction
     if fmt == 'toml' and schema.get('type', 'object') != 'object':
         return 'TOML top level is always a table; schema requires ' + str(schema.get('type'))
     if fmt == 'csv':
@@ -209,13 +407,15 @@ def candidate_code(text, entry_point=None):
     An unfenced response runs as written; an unclosed final fence still counts as the block."""
     blocks = [code for lang, code in CODE_FENCE.findall(text) if lang.casefold() in PYTHON_FENCES]
     if not blocks:
-        unclosed = re.match(r"\s*```[ \t]*(?:python3?|py3?)?[ \t]*\n(.*)", text, re.S | re.I)
+        unclosed = re.search(r"```[ \t]*(?:python3?|py3?)?[ \t]*\n((?:(?!```).)*)$", text, re.S | re.I)
         return (unclosed.group(1), "unclosed_block") if unclosed else (text, "whole_response")
-    if entry_point:
-        defines = re.compile(r"^[ \t]*(?:async[ \t]+)?def[ \t]+" + re.escape(entry_point) + r"[ \t]*\(", re.M)
-        for index in range(len(blocks) - 1, -1, -1):
-            if defines.search(blocks[index]):
-                return blocks[index], f"block {index + 1} of {len(blocks)}"
+    # A function task runs the last block defining the function; a stdin program the last
+    # block that reads input. Usage-example blocks around the solution are allowed.
+    solution = (re.compile(r"^[ \t]*(?:async[ \t]+)?def[ \t]+" + re.escape(entry_point) + r"[ \t]*\(", re.M)
+                if entry_point else re.compile(r"\binput\s*\(|\bstdin\b|open\(\s*0|fileinput"))
+    for index in range(len(blocks) - 1, -1, -1):
+        if solution.search(blocks[index]):
+            return blocks[index], f"block {index + 1} of {len(blocks)}"
     return blocks[-1], f"block {len(blocks)} of {len(blocks)}"
 
 
@@ -352,6 +552,12 @@ class Grader:
                           failure='candidate_truncated', scoring_policy='fixed_budget_v1')
         if not text.strip():
             return result(0, False if row.get("binary", True) else None, failure="empty_response")
+        if asks_final_line(row) and not final_line(text):
+            return result(0, False, failure="format missing: Final answer line")
+        if kind == "equivalence" and not meta.get("output_regex") and "\\boxed" in row["messages"][-1]["content"]:
+            meta = dict(meta, output_regex=BOXED)  # the prompt asked for \boxed{}: judge the boxed answer
+            if not extract_final(text, meta):
+                return result(0, False, failure="format missing: \\boxed{}")
         final = extract_final(text, meta)
         if kind == "math":
             proc = subprocess.run([sys.executable, "-m", "eval_stack.native_math"],
@@ -367,10 +573,18 @@ class Grader:
             if row.get('task') == 'mcqa' and (str(meta['answer']) not in meta['labels'] or
                     len(set(meta['labels'])) != len(meta['labels']) or len(meta['labels']) < 2):
                 raise GradingError('Invalid MCQA gold/options; quarantine instead of scoring the candidate')
-            # One explicit final label, never first letter anywhere in reasoning.
+            # One explicit final label, never first letter anywhere in reasoning. Text after the
+            # label is allowed ("D) option text", "D. because"); two labels ("B or C") are not.
+            text = re.sub(r"\*+", "", text)
+            final = extract_final(text, meta)
             def label(span):
-                match = re.fullmatch(r"\s*[([]?([A-Z0-9]+)[)\].]?\s*", span)
-                return match.group(1) if match else None
+                match = re.match(r"\s*[([]?([A-Z0-9]+)[)\].:,]?(?=\s|$)", span)
+                if not match:
+                    return None
+                others = re.findall(r"(?:\bor\b|\band\b|/)\s*[([]?([A-Z0-9]+)\b", span[match.end():])
+                if any(o in meta['labels'] and o != match.group(1) for o in others):
+                    return None  # "B or C" hedges between options
+                return match.group(1)
             chosen = label(final)
             if chosen not in meta['labels'] and meta.get('output_regex') in MCQA_FORMATS:
                 other = next(f for f in MCQA_FORMATS if f != meta['output_regex'])
@@ -407,6 +621,9 @@ class Grader:
                 return result(check['verdict'], check['verdict'], extracted=final, correctness_judge=check)
             return result(passed, passed, extracted=final)
         if kind == "equivalence":
+            if not meta.get("output_regex"):
+                block = final_answer_block(text)  # a multi-line final answer (display math) is one answer
+                final = unemphasize(block) if block and block.strip() else text.strip()
             if not final:
                 return result(0, False, failure="answer_extraction")
             check = self.judge_json({"question": "Is the candidate answer equivalent to the reference for this problem? Reject missing required content and material contradictions.",
@@ -455,6 +672,8 @@ class Grader:
                 except syntax_errors as e:
                     error = error if error != 'no structured content' else str(e)
                     continue
+                if not schema and fmt != 'xml' and not isinstance(obj, (dict, list)):
+                    continue  # a bare string or number (any sentence is valid YAML) is not the requested data
                 chosen = candidate
                 break
             if chosen is None:
@@ -473,7 +692,9 @@ class Grader:
         if kind == "retrieval":
             targets = meta["targets"]
             # RULER native recall uses containment; strict all-target uses the same target matching.
-            checks = [str(t).casefold() in final.casefold() for t in targets]
+            block = final_answer_block(text)
+            answer = block if block and block.strip() else text
+            checks = [str(t).casefold() in answer.casefold() for t in targets]
             if not checks:
                 raise GradingError("Missing targets")
             passed = any(checks) if meta.get('any_alias') else all(checks)
@@ -485,6 +706,9 @@ class Grader:
             passed = verify(final_calendar, meta['calendar'])
             return result(passed, passed, extracted_from_prose=final_calendar.strip() != text.strip())
         if kind in ("humanevalplus", "apps"):
+            if ("code block" in row["messages"][-1]["content"] and
+                    candidate_code(text, meta.get("entry_point"))[1] == "whole_response"):
+                return result(0, False, failure="format missing: python code block")
             return self.execute_code(row, text)
         raise GradingError("Unimplemented verifier: " + kind)
 
