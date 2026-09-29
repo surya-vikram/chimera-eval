@@ -42,7 +42,9 @@ class CompareTests(unittest.TestCase):
             self.assertEqual(table[1]['quality_pass@2'], '')     # quality has no pass@k
             self.assertEqual(table[0]['python_score'], '')       # domain not evaluated
             header = list(table[0])
-            self.assertLess(header.index('aggregate_pass@2'), header.index('aggregate_pass@4'))
+            self.assertEqual(header[:5], ['run', 'model_path', 'aggregate_score', 'aggregate_pass@1', 'aggregate_pass@2'])
+            self.assertEqual(header[6:16], [d + '_score' for d in compare.DOMAINS])
+            self.assertEqual(table[0]['math_score'], '90.0')
 
     def test_model_path_from_saved_run_script(self):
         with tempfile.TemporaryDirectory() as td:

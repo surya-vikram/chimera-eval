@@ -4,10 +4,11 @@
     python3 compare.py outputs                 # writes outputs/comparison.csv
     python3 compare.py outputs -o models.csv
 
-Columns: run, model_path (from the run's saved launch settings), model and judge names, the
-selection and sampling settings, aggregate score and pass@k, then score and pass@k for every
-domain. Scores are percentages. A value the run does not have (a domain it did not evaluate,
-a k it did not request, pass@k for quality) is left empty. Standard library only.
+Columns: run, model_path (from the run's saved launch settings), aggregate score and pass@k,
+the score of every domain, pass@k of every domain, then model and judge names and the
+selection and sampling settings. Scores are percentages. A value the run does not have
+(a domain it did not evaluate, a k it did not request, pass@k for quality) is left empty.
+Standard library only.
 """
 import argparse
 import csv
@@ -79,11 +80,14 @@ def summarize(run):
 
 
 def columns(rows):
-    """Fixed columns first, then pass@k in numeric order of k, domains in protocol order."""
+    """Run and model, aggregate score and pass@k, the ten domain scores side by side, domain
+    pass@k (k in numeric order), then the settings and diagnostics of each run."""
     ks = sorted({key.split('@')[1] for r in rows for key in r if '@' in key}, key=int)
-    fixed = [k for k in rows[0] if '@' not in k and not any(k.startswith(d + '_') for d in DOMAINS)]
-    return (fixed + [f'aggregate_pass@{k}' for k in ks] +
-            [c for d in DOMAINS for c in [f'{d}_score', *(f'{d}_pass@{k}' for k in ks)]])
+    lead = ['run', 'model_path', 'aggregate_score', *(f'aggregate_pass@{k}' for k in ks)]
+    scores = [f'{d}_score' for d in DOMAINS]
+    passes = [f'{d}_pass@{k}' for d in DOMAINS for k in ks]
+    rest = [k for k in rows[0] if k not in lead and k not in scores and '@' not in k]
+    return lead + scores + passes + rest
 
 
 def compare(outputs, destination=None):
@@ -109,15 +113,17 @@ def main():
     if not rows:
         raise SystemExit(f'No finished runs (no */metrics.json) under {args.outputs}')
     ks = sorted({key.split('@')[1] for r in rows for key in r if key.startswith('aggregate_pass@')}, key=int)
-    header = ['#', 'run', 'model', 'aggregate', *(f'pass@{k}' for k in ks), 'all graded']
-    table = [[str(i), r['run'], r['model_path'] or r['model_name'],
-              '' if r['aggregate_score'] is None else f"{r['aggregate_score']:.1f}",
-              *('' if r.get(f'aggregate_pass@{k}') in (None, '') else f"{r[f'aggregate_pass@{k}']:.1f}" for k in ks),
-              'yes' if r['aggregate_complete'] is True else 'no'] for i, r in enumerate(rows, 1)]
+    short = {'knowledge': 'know', 'grounding': 'ground', 'quality': 'qual', 'instruction': 'instr',
+             'multiturn': 'multi', 'structure': 'struct', 'long_context': 'long'}
+    fmt = lambda v: '' if v in (None, '') else f'{v:.1f}'
+    header = ['#', 'run', 'model', 'aggregate', *(f'pass@{k}' for k in ks), *(short.get(d, d) for d in DOMAINS)]
+    table = [[str(i), r['run'], Path(r['model_path']).name if r['model_path'] else r['model_name'],
+              fmt(r['aggregate_score']), *(fmt(r.get(f'aggregate_pass@{k}')) for k in ks),
+              *(fmt(r[f'{d}_score']) for d in DOMAINS)] for i, r in enumerate(rows, 1)]
     widths = [max(len(x) for x in col) for col in zip(header, *table)]
     for line in [header, *table]:
         print('  '.join(v.ljust(w) if i in (1, 2) else v.rjust(w) for i, (v, w) in enumerate(zip(line, widths))))
-    print(f'\n{len(rows)} runs -> {destination}')
+    print(f'\nScores in %; empty = not evaluated. {len(rows)} runs -> {destination}')
 
 
 if __name__ == '__main__':
