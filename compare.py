@@ -4,7 +4,7 @@
     python3 compare.py outputs                 # writes outputs/comparison.csv
     python3 compare.py outputs -o models.csv
 
-Columns: model_path (from the run's saved launch settings), aggregate score and pass@k, the
+Columns: model_path (from the run's saved launch settings, shown relative to EXPORTS_ROOT), aggregate score and pass@k, the
 score of every domain, pass@k of every domain, then model and judge names, the selection
 and sampling settings, and the run folder. Scores are percentages. A value the run does not have
 (a domain it did not evaluate, a k it did not request, pass@k for quality) is left empty.
@@ -16,6 +16,9 @@ import json
 from pathlib import Path
 import shlex
 import statistics
+
+# Checkpoints live under this folder on the evaluation machine; only the part after it is shown.
+EXPORTS_ROOT = '/nvme_zone3/home/ekamai1/chimera/data/exports'
 
 DOMAINS = ("math", "knowledge", "logic", "grounding", "quality", "instruction",
            "multiturn", "structure", "python", "long_context")
@@ -39,11 +42,17 @@ def launch_settings(run):
     return settings
 
 
+def short_path(path, root=EXPORTS_ROOT):
+    """zoro2_v2_full for <root>/zoro2_v2_full; paths outside root are kept whole."""
+    path, root = path.rstrip('/'), root.rstrip('/')
+    return path[len(root) + 1:] if root and path.startswith(root + '/') else path
+
+
 def percent(value):
     return None if value is None else round(100 * value, 2)
 
 
-def summarize(run):
+def summarize(run, root=EXPORTS_ROOT):
     metrics = json.loads((run / 'metrics.json').read_text())
     config = json.loads((run / 'config.json').read_text()).get('config', {}) if (run / 'config.json').exists() else {}
     launch = launch_settings(run)
@@ -60,7 +69,7 @@ def summarize(run):
     sampling = config.get('MODEL_SAMPLING', {})
     row = {'run': run.name,
            # Runs launched before MODEL_PATH existed are identified by the served model name.
-           'model_path': launch.get('MODEL_PATH') or config.get('MODEL_NAME', launch.get('MODEL_NAME', '')),
+           'model_path': short_path(launch.get('MODEL_PATH', ''), root) or config.get('MODEL_NAME', launch.get('MODEL_NAME', '')),
            'model_name': config.get('MODEL_NAME', launch.get('MODEL_NAME', '')),
            'judge_name': config.get('JUDGE_NAME', launch.get('JUDGE_NAME', '')),
            'split': config.get('SPLIT', ''), 'tasks': config.get('TASKS', '') or 'all',
@@ -91,9 +100,9 @@ def columns(rows):
     return lead + scores + passes + rest + ['run']
 
 
-def compare(outputs, destination=None):
+def compare(outputs, destination=None, root=EXPORTS_ROOT):
     runs = sorted(p.parent for p in Path(outputs).glob('*/metrics.json') if not p.parent.name.startswith('.'))
-    rows = [summarize(run) for run in runs]
+    rows = [summarize(run, root) for run in runs]
     rows.sort(key=lambda r: (r['aggregate_score'] is None, -(r['aggregate_score'] or 0), r['run']))
     destination = Path(destination) if destination else Path(outputs) / 'comparison.csv'
     if rows:
@@ -109,8 +118,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('outputs', help='folder holding one subfolder per run (OUTPUT_PATH)')
     parser.add_argument('-o', '--output', help='CSV path (default: <outputs>/comparison.csv)')
+    parser.add_argument('--exports-root', default=EXPORTS_ROOT,
+                        help='folder prefix removed from model_path (default: %(default)s; "" keeps full paths)')
     args = parser.parse_args()
-    rows, destination = compare(args.outputs, args.output)
+    rows, destination = compare(args.outputs, args.output, args.exports_root)
     if not rows:
         raise SystemExit(f'No finished runs (no */metrics.json) under {args.outputs}')
     ks = sorted({key.split('@')[1] for r in rows for key in r if key.startswith('aggregate_pass@')}, key=int)

@@ -120,7 +120,10 @@ One row per finished run, highest aggregate first: `model_path` (from the run's 
 launch settings), aggregate score and pass@k, the ten domain scores side by side, pass@k
 for each domain, then model and judge names, selection and sampling settings, and the
 run folder. Scores
-are percentages. The terminal shows the same ranking with the domain scores. Cells a
+are percentages. The terminal shows the same ranking with the domain scores.
+`model_path` drops the `/nvme_zone3/home/ekamai1/chimera/data/exports/` prefix, so
+`.../exports/zoro2_v2_full` shows as `zoro2_v2_full`; other paths stay whole. Change
+it with `--exports-root`. Cells a
 run does not have (a domain it skipped, a k it did not request, quality pass@k) are
 empty. It needs only Python 3's standard library.
 

@@ -56,6 +56,15 @@ class CompareTests(unittest.TestCase):
             (root / 'r' / 'run_eval.sh').unlink()
             self.assertEqual(compare.compare(root)[0][0]['model_path'], 'r')  # falls back to the model name
 
+    def test_exports_prefix_removed(self):
+        root = '/nvme_zone3/home/ekamai1/chimera/data/exports'
+        self.assertEqual(compare.short_path(root + '/zoro2_v2_full'), 'zoro2_v2_full')
+        self.assertEqual(compare.short_path(root + '/zoro2_v2_full/'), 'zoro2_v2_full')
+        self.assertEqual(compare.short_path(root + '/zoro2/iter_100'), 'zoro2/iter_100')
+        self.assertEqual(compare.short_path('/nvme_zone3/home/ekamai1/Gemma/gemma4-31b'), '/nvme_zone3/home/ekamai1/Gemma/gemma4-31b')
+        self.assertEqual(compare.short_path(root + '_old/x'), root + '_old/x')  # a different folder, not a prefix match
+        self.assertEqual(compare.short_path(root + '/x', ''), root + '/x')
+
 
 if __name__ == '__main__':
     unittest.main()
