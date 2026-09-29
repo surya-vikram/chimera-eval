@@ -52,6 +52,17 @@ class ReliabilityTests(unittest.TestCase):
             with patch.dict('os.environ', {'TASK_MAX_TOKENS_JSON':value}), self.assertRaises(ValueError):
                 settings()
 
+    def test_stop_token_ids_reach_only_the_model_request(self):
+        with patch.dict('os.environ', {'MODEL_STOP_TOKEN_IDS_JSON':'[1,3]','JUDGE_STOP_TOKEN_IDS_JSON':'[7]'}):
+            config=settings()
+        self.assertEqual(config['MODEL_SAMPLING']['stop_token_ids'],[1,3])
+        self.assertNotIn('stop_token_ids',config['JUDGE_SAMPLING'])
+        with patch.dict('os.environ', {'MODEL_STOP_TOKEN_IDS_JSON':'[]'}):
+            self.assertNotIn('stop_token_ids',settings()['MODEL_SAMPLING'])
+        for value in ('{}','[1.5]','["<end_of_turn>"]','[-1]'):
+            with patch.dict('os.environ', {'MODEL_STOP_TOKEN_IDS_JSON':value}), self.assertRaises(ValueError):
+                settings()
+
     def test_truncation_has_distinct_exit_and_warning(self):
         report={'truncated_samples':1,'infrastructure_errors':0,'incomplete_prompts':0}
         output=io.StringIO()

@@ -39,16 +39,20 @@ declare -A CONFIG=(
   [SEED]=42
   [EVAL_CONTEXT_BUCKETS]=""            # Blank = all fitting; e.g. "4096,8192,16384"
 
-  # Sampling and model-specific reasoning options. Use '{}' for other templates.
-  [MODEL_TEMPERATURE]=1
+  # Model sampling: the same as Chimera MixRL rollouts and training (slime mixrl/config.env
+  # ROLLOUT_TEMPERATURE=1.0, ROLLOUT_TOP_P=0.95, top-k off). Chat template options: '{}' for Chimera.
+  [MODEL_TEMPERATURE]=1.0
   [MODEL_TOP_P]=0.95
-  [MODEL_TOP_K]=20
+  [MODEL_TOP_K]=-1
   [MODEL_REPETITION_PENALTY]=1.0
   [MODEL_MIN_P]=0.0
   [MODEL_PRESENCE_PENALTY]=0.0
   [MODEL_FREQUENCY_PENALTY]=0.0
-  [MODEL_CHAT_TEMPLATE_KWARGS]='{"reasoning_strength":"high"}'
+  [MODEL_CHAT_TEMPLATE_KWARGS]='{}'
   [MODEL_STOP_JSON]='[]'
+  # Token ids that end the model's answer (never sent to the judge). Chimera: <EOS> 1 and
+  # <end_of_turn> 3, which its generation_config does not list. Other models: '[]' (ids differ).
+  [MODEL_STOP_TOKEN_IDS_JSON]='[1,3]'
   [JUDGE_TEMPERATURE]=1
   [JUDGE_TOP_P]=0.95
   [JUDGE_TOP_K]=20

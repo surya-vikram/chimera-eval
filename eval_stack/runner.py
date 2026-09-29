@@ -60,6 +60,13 @@ def settings():
         stop = json.loads(env(role + '_STOP_JSON', '[]'))
         if stop:
             sampling['stop'] = stop
+        stop_ids = json.loads(env('MODEL_STOP_TOKEN_IDS_JSON', '[]')) if role == 'MODEL' else []
+        if not isinstance(stop_ids, list) or any(type(i) is not int or i < 0 for i in stop_ids):
+            raise ValueError('MODEL_STOP_TOKEN_IDS_JSON must be a JSON list of token ids')
+        if stop_ids:
+            # Model under test only. vLLM/SGLang extension: end generation at any of these token ids,
+            # left out of the text. Stop strings cannot, since special tokens are removed before matching.
+            sampling['stop_token_ids'] = stop_ids
         c[role + '_SAMPLING'] = sampling
         if role == 'JUDGE':
             c[role + '_SAMPLING']['seed'] = c['SEED']
