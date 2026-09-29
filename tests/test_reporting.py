@@ -51,7 +51,8 @@ class ReportTests(unittest.TestCase):
         self.assertIn('Pass@1', text)
         self.assertIn('Pass@4', text)
         self.assertIn('100.0%', text)  # pass@4: one of four samples passes
-        self.assertIn('Aggregate score: 25.0 / 100 (partial:', text)
+        self.assertIn('Aggregate score: 25.0 / 100 | Pass@1: 25.0% | Pass@4: 100.0% (partial:', text)
+        self.assertRegex(text, r'\| aggregate +\| +3 / 4 \| +25\.0%\* \| +25\.0% \| +100\.0% \|')
         self.assertIn('25.0%*', text)  # python has an incomplete prompt
 
     def test_tables_are_aligned(self):

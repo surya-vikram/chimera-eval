@@ -96,5 +96,5 @@ def _regrade(source,out):
                   source_target_sampling=original['config'].get('MODEL_SAMPLING'),judge_protocol=protocol_id(),
                   judge_validation='requires independent calibration; no automatic certification')
     write_json(out/'metrics.json',report);write_json(out/'reliability.json',audit_records(records,out/'judge_attempts'))
-    print('\n'.join(['',*score_tables(report),'',f"Metrics: {out/'metrics.json'}"]),flush=True)
+    print('\n'.join(['',*score_tables(report,tasks=False)]),flush=True)
     return report

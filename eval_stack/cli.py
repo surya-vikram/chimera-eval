@@ -5,8 +5,9 @@ from .common import env
 
 def check_report(report):
     if report.get('truncated_samples', 0):
-        print('TRUNCATION DETECTED: capped responses count as zero in the fixed-budget score. '
-              'See metrics.json for counts; compare models using identical task budgets.', file=sys.stderr)
+        total = report.get('operations', {}).get('candidate_turns')
+        print(f"TRUNCATION DETECTED: {report['truncated_samples']}" + (f' of {total}' if total else '') +
+              ' samples hit their response cap and scored 0; compare models at identical caps.', file=sys.stderr)
     if report['infrastructure_errors'] or report['incomplete_prompts']:
         raise SystemExit(2)
 

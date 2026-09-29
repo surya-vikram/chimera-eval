@@ -92,6 +92,15 @@ sys.exit(0)
         self.assertIn(str(self.data) + ':/data:ro', args)
         log = Path(self.env['OUTPUT_PATH'])/'fixture-run.log'
         self.assertIn('"completed":1', log.read_text())
+        # The launch script and the values actually used are saved with the results.
+        run_dir = Path(self.env['OUTPUT_PATH'])/'fixture-run'
+        self.assertTrue((run_dir/'run_eval.sh').exists())
+        saved = (run_dir/'launch_config.env').read_text()
+        self.assertIn("TASKS='gsm8k,math500'", saved)
+        self.assertIn('MODEL_CHAT_TEMPLATE_KWARGS=\'{"reasoning_strength":"high"}\'', saved)
+        p = self.run_script(MODEL_PATH='/other/weights')
+        self.assertEqual(p.returncode, 1)
+        self.assertIn('would mix models', p.stderr)
         code = Path(self.env['OUTPUT_PATH'])/'.launchers/fixture-run/code'
         self.assertTrue((code/'eval_stack/run_audit.py').exists())
         self.assertFalse(list(code.parent.glob('control.*')))

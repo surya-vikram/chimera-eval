@@ -347,7 +347,7 @@ def task_order(task, report):
     return (DOMAINS.index(domain) if domain in DOMAINS else len(DOMAINS), task)
 
 
-def score_tables(scores, audit=None):
+def score_tables(scores, audit=None, tasks=True):
     """Aggregate, domain and task scores with a pass@k column for every requested k.
     With an audit report, sample coverage, truncation and error counts are added."""
     ks = [str(k) for k in scores.get('pass_k') or [1]]
@@ -355,7 +355,9 @@ def score_tables(scores, audit=None):
     if agg is None:
         head = 'Aggregate score: — (no domain has a fully graded prompt yet)'
     else:
-        head = f'Aggregate score: {agg:.1f} / 100'
+        passes = scores.get('aggregate_pass_at_k') or {}
+        head = ' | '.join([f'Aggregate score: {agg:.1f} / 100',
+                           *(f'Pass@{k}: ' + ('—' if passes.get(k) is None else f'{passes[k]:.1f}%') for k in ks)])
         if not scores.get('aggregate_complete'):
             gaps = [f"{label} {', '.join(names)}" for label, names in
                     (('missing', scores.get('aggregate_missing_domains')),
@@ -374,13 +376,22 @@ def score_tables(scores, audit=None):
     domains = scores.get('domains') or {}
     shown = [d for d in DOMAINS if domains.get(d) or d in audit.get('domains', {})]
     domain_rows = [row(d, domains.get(d) or {}, audit.get('domains', {}).get(d)) for d in shown]
+    if agg is not None:
+        passes = scores.get('aggregate_pass_at_k') or {}
+        total = {'score': agg / 100, 'complete': scores.get('aggregate_complete'),
+                 'pass': {k: None if passes.get(k) is None else passes[k] / 100 for k in ks},
+                 'prompts': sum(d['prompts'] for d in domains.values() if d),
+                 'scored_prompts': sum(d['scored_prompts'] for d in domains.values() if d)}
+        domain_rows.append(row('aggregate', total, audit.get('overall')))
     task_scores = scores.get('tasks') or {}
     names = sorted(set(task_scores) | set(audit.get('tasks', {})), key=lambda t: task_order(t, {**audit, 'scores': scores}))
     task_rows = [row(t, task_scores.get(t) or {}, audit.get('tasks', {}).get(t)) for t in names]
     header = lambda first: [first, counts[0], 'Score', *counts[1:]]
-    return [head, '', *table(header('Domain'), domain_rows), '', *table(header('Task'), task_rows), '',
-            'Score: mean prompt score, truncated responses count 0. Pass@k: unbiased estimate from '
-            f"{scores.get('n_samples', '?')} samples per prompt. * domain has ungraded prompts."]
+    lines = [head, '', *table(header('Domain'), domain_rows), '']
+    if tasks:
+        lines += [*table(header('Task'), task_rows), '']
+    return lines + [f"Score: mean per prompt, truncated = 0 · Pass@k from {scores.get('n_samples', '?')} samples per prompt "
+                    '· aggregate: equal domain weights · quality has no pass@k · * incomplete.']
 
 
 def markdown(report):

@@ -114,6 +114,10 @@ def aggregate(rows, records, n, ks, complete_scope=False):
             'comparison_budget_valid': not bool(incomplete or errors),
             'score_interpretation': 'Fixed-budget performance: capped trajectories score zero and fail pass@k; judge errors are not model failures.',
             'aggregate_score_0_100': 100 * statistics.mean(d['score'] for d in scored_domains) if scored_domains else None,
+            # Pass@k over the same domains; quality is continuous and has none.
+            'aggregate_pass_at_k': {str(k): 100 * statistics.mean(v) if v else None for k, v in
+                                    ((k, [d['pass'][str(k)] for d in scored_domains if d['pass'][str(k)] is not None])
+                                     for k in ks)},
             'aggregate_complete': aggregate_complete,
             'aggregate_missing_domains': [k for k, d in domains.items() if not d],
             'aggregate_partial_domains': [k for k, d in domains.items() if d and not d['complete']],

@@ -68,4 +68,4 @@ class Progress:
         filled = width * done // self.total if self.total else width
         counts = ' · '.join(f'{name} {self.counts[name]}' for name in OUTCOMES if self.counts[name] or name in ('passed', 'failed', 'error'))
         return (f"[{'#' * filled}{'.' * (width - filled)}] {done}/{self.total} ({100 * done / max(self.total, 1):.0f}%) | "
-                f'{counts} | {rate:.2f}/s | elapsed {clock(elapsed)} | eta {eta}')
+                f'{counts} | {rate:.2f}/s | elapsed {clock(elapsed)}' + (f' | eta {eta}' if done < self.total else ''))

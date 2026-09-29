@@ -271,6 +271,9 @@ def _evaluate():
     write_json(out / 'reliability.json', audit_records(records, out/'judge_attempts'))
     from .run_audit import audit_run, score_tables
     audit = audit_run(out, root, running=False)
-    print('\n'.join(['', *score_tables(report, audit), '', f"Metrics: {out / 'metrics.json'}",
-                     f"Audit: {out / 'audit' / 'report.md'}"]), flush=True)
+    print('\n'.join(['', f"Results: {c['MODEL_NAME']} judged by {c['JUDGE_NAME']} · {len(rows)} prompts × {c['N_SAMPLES']} samples",
+                     *score_tables(report, audit, tasks=False),
+                     'Per-task scores and why samples scored zero: audit/report.md'
+                     + (f" · untested context lengths: {', '.join(map(str, report['untested_length_buckets']))}"
+                        if report['untested_length_buckets'] and (not c['TASKS'] or 'long_' in c['TASKS']) else '')]), flush=True)
     return report

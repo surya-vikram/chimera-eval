@@ -14,6 +14,8 @@ DOCKER_SOCKET="${DOCKER_SOCKET:-/var/run/docker.sock}"
 
 declare -A CONFIG=(
   # Models are already hosted. Use reachable internal URLs ending in /v1.
+  # MODEL_PATH: the weights served at MODEL_URL. Recorded with the run for compare.py; not loaded here.
+  [MODEL_PATH]="/nvme_zone3/home/ekamai1/Gemma/gemma4-31b"
   [MODEL_URL]="http://127.0.0.1:8025/v1"
   [MODEL_NAME]="judge"
   [MODEL_CONTEXT]=32768
@@ -143,6 +145,23 @@ if [[ ! -d "$CODE_PATH" ]]; then
   mv -T -- "$STAGING_PATH" "$CODE_PATH"
 fi
 [[ -f "$CODE_PATH/eval_entrypoint.sh" && -d "$CODE_PATH/eval_stack" ]] || die "Incomplete code snapshot: $CODE_PATH. Choose a new RUN_NAME."
+
+# Save how the run was launched next to its results: this script as edited, and the values
+# actually used (environment overrides included). Written once; a resume must match it.
+RUN_PATH="$OUTPUT_PATH/$RUN_NAME"
+mkdir -p -- "$RUN_PATH"
+quote() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
+launch_settings() {
+  for key in IMAGE CODE_IMAGE DATA_PATH OUTPUT_PATH RUN_NAME; do printf '%s=%s\n' "$key" "$(quote "${!key}")"; done
+  for key in $(printf '%s\n' "${!CONFIG[@]}" | sort); do printf '%s=%s\n' "$key" "$(quote "${CONFIG[$key]}")"; done
+}
+if [[ -f "$RUN_PATH/launch_config.env" ]]; then
+  recorded="$(grep '^MODEL_PATH=' "$RUN_PATH/launch_config.env" || true)"
+  [[ "$recorded" == "MODEL_PATH=$(quote "${CONFIG[MODEL_PATH]}")" ]] || die "$RUN_NAME was launched with $recorded; resuming with another MODEL_PATH would mix models. Choose a new RUN_NAME."
+else
+  cp -- "${BASH_SOURCE[0]}" "$RUN_PATH/run_eval.sh"
+  { printf '# Settings used for run %s, launched %s\n' "$RUN_NAME" "$(date -Is)"; launch_settings; } > "$RUN_PATH/launch_config.env"
+fi
 
 CONTROL_PATH="$(mktemp -d "$LAUNCH_PATH/control.XXXXXX")"
 CID_FILE="$CONTROL_PATH/container.id"

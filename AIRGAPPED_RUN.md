@@ -106,6 +106,21 @@ under `OUTPUT_PATH/RUN_NAME/`:
   answered next to the `response`, then the grade.
 - `judge_attempts/`: auditable judge calls.
 - `config.json`: the frozen settings and run fingerprint.
+- `run_eval.sh` and `launch_config.env`: the launcher as edited and the values it
+  actually used (environment overrides included), with `MODEL_PATH`, so the run can
+  be reproduced. A resume under the same `RUN_NAME` must use the same `MODEL_PATH`.
+
+## 4. Compare runs
+
+```bash
+python3 compare.py outputs            # writes outputs/comparison.csv
+```
+
+One row per finished run, highest aggregate first: `model_path` (from the run's saved
+launch settings), model and judge names, selection and sampling settings, aggregate
+score and pass@k, then score and pass@k for each domain, all as percentages. Cells a
+run does not have (a domain it skipped, a k it did not request, quality pass@k) are
+empty. It needs only Python 3's standard library.
 
 Exit 0 means grading completed without unresolved errors; it does not certify judge
 accuracy. Exit 2 means grading or evaluation is incomplete. A diagnostic subset

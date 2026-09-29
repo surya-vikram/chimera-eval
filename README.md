@@ -16,7 +16,9 @@ starts the evaluator, streams and saves progress, and preserves results and a co
 snapshot. It never pulls images or downloads data. Models must already be hosted.
 Checked-in configuration: up to 50 prompts per task across all domains, 4 responses each
 (pass@1, pass@4); set `LIMIT_PER_TASK=0` for the full inventory. `serve_gemma.sh` and
-`serve_chimera.sh` host the judge and target on the air-gapped machine. See [AIRGAPPED_RUN.md](AIRGAPPED_RUN.md).
+`serve_chimera.sh` host the judge and target on the air-gapped machine. Set `MODEL_PATH`
+to the weights behind `MODEL_URL`; each run saves its launch settings, and
+`python3 compare.py outputs` ranks all runs in a CSV (standard library only). See [AIRGAPPED_RUN.md](AIRGAPPED_RUN.md).
 
 `eval_entrypoint.sh` is the lower-level entrypoint used inside Docker or for direct Python runs.
 
