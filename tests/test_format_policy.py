@@ -106,6 +106,18 @@ class RequestedFormatTests(unittest.TestCase):
         text = f'```python\n{solution}\n```\n\nExample:\n```python\nprint("demo")\n```'
         self.assertEqual(candidate_code(text)[0].strip(), solution)
 
+    def test_prompt_helpers_are_provided_imports_are_not(self):
+        from eval_stack.graders import with_prompt_helpers
+        problem = {'entry_point': 'make_palindrome',
+                   'prompt': 'from typing import List\n\ndef is_palindrome(s):\n    return s == s[::-1]\n\n'
+                             'def make_palindrome(s):\n    """doc"""\n'}
+        answer = 'def make_palindrome(s):\n    return s if is_palindrome(s) else s + s[::-1]'
+        code = with_prompt_helpers(problem, answer)
+        self.assertIn('def is_palindrome', code)
+        self.assertNotIn('from typing', code)  # imports stay the answer's job, as the prompt asks
+        own = 'def is_palindrome(s):\n    return True\n\n' + answer
+        self.assertEqual(with_prompt_helpers(problem, own), own)  # the answer's own helper wins
+
     def test_bare_yaml_scalar_is_not_data(self):
         yaml_row = row('structure', 'Convert to YAML.', domain='structure', format='yaml', requirements=[])
         out = grade(yaml_row, 'I could not find the requested information.')

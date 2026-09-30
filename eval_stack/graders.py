@@ -419,6 +419,22 @@ def candidate_code(text, entry_point=None):
     return blocks[-1], f"block {len(blocks)} of {len(blocks)}"
 
 
+def with_prompt_helpers(problem, code):
+    """HumanEval+ prompts can define helper functions (is_palindrome, encode_cyclic) that the
+    requested function calls. The prompt asks for "the complete function", not the helpers, so
+    the prompt's helpers the answer does not define itself are provided. Imports are not: the
+    prompt asks for them explicitly."""
+    import ast
+    prompt, entry = problem.get("prompt") or "", problem.get("entry_point")
+    try:
+        helpers = [n for n in ast.parse(prompt).body if isinstance(n, ast.FunctionDef) and n.name != entry]
+        defined = {n.name for n in ast.walk(ast.parse(code)) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    except SyntaxError:
+        return code
+    missing = [ast.get_source_segment(prompt, n) for n in helpers if n.name not in defined]
+    return "\n\n".join(missing + [code]) if missing else code
+
+
 def code_diagnostics(code, entry_point=None):
     """Why a program may have failed, for reports only; the sandbox verdict is the grade."""
     import ast
@@ -758,6 +774,8 @@ class Grader:
 
     def execute_code(self, row, text):
         code, source = candidate_code(text, row["verification"].get("entry_point"))
+        if row["verifier"] == "humanevalplus":
+            code = with_prompt_helpers(row["verification"], code)
         name = 'chimera-code-' + uuid.uuid4().hex
         command = ["docker", "run", "--pull=never", "--name", name, "--rm", "-i", "--network", "none", "--read-only",
                    "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "64",
