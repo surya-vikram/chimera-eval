@@ -659,8 +659,13 @@ class Grader:
             verdicts, raw = [], []
             # The judge reads the completed conversation once, the candidate as its final turn.
             conversation = row["messages"] + [{"role": "assistant", "content": text}]
-            for check in checks:
-                j = self.judge_json({"question": rubric_question(check["content"]), "conversation": conversation})
+            # Checks are independent: ask them concurrently (same verdicts, about one call's latency
+            # instead of one per check, which made long rubrics the last answers graded in a step).
+            from concurrent.futures import ThreadPoolExecutor
+            ask = lambda check: self.judge_json({"question": rubric_question(check["content"]), "conversation": conversation})
+            with ThreadPoolExecutor(max_workers=len(checks)) as pool:
+                judgments = list(pool.map(ask, checks))
+            for check, j in zip(checks, judgments):
                 passed = j["verdict"] == (check.get("pass_criteria", "YES") == "YES")
                 if check.get("source") == "user" and check.get("is_misalignment_check"):
                     passed = not passed

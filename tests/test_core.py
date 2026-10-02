@@ -65,6 +65,29 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(GradingError):
             g.grade(row('rubric', checks=[{'content':'Bad?', 'pass_criteria':'NO'}]), response('content'))
 
+    def test_rubric_checks_are_judged_concurrently_in_order(self):
+        import threading, time
+        class SlowJudge:
+            def __init__(self):
+                self.active = self.peak = 0
+                self.lock = threading.Lock()
+            def token_count(self, messages): return 10
+            def complete(self, messages, *args, **kwargs):
+                with self.lock:
+                    self.active += 1
+                    self.peak = max(self.peak, self.active)
+                time.sleep(.2)
+                with self.lock:
+                    self.active -= 1
+                text = json.dumps(messages)
+                verdict = 'Check two?' not in text
+                return {'text': json.dumps({'verdict': verdict, 'reason': 'fixture'}), 'finish_reason': 'stop', 'usage': {}}
+        judge = SlowJudge()
+        checks = [{'content': 'Check one?'}, {'content': 'Check two?'}, {'content': 'Check three?'}]
+        out = Grader(judge).grade(row('rubric', checks=checks), response('content'))
+        self.assertEqual(out['components']['checks'], [True, False, True])  # verdicts stay in check order
+        self.assertEqual(judge.peak, 3)  # all checks in flight together
+
     def test_qa_aliases(self):
         self.assertEqual(answer_metrics('the United States', ['United States']), (1,1.))
         g = Grader()
