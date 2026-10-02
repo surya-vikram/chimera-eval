@@ -12,15 +12,18 @@ import hashlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import math
+import os
 from pathlib import Path
 from socketserver import ThreadingMixIn
 import threading
+import time
 import urllib.request
 
 from .client import Client
 from .common import digest, read_jsonl, validate_record, write_json
 from .graders import JUDGE_USES, Grader, judge_use, quarantine_reason
 from .runner import settings
+from .service_log import ServiceLog
 
 
 class Conflict(ValueError):
@@ -145,15 +148,17 @@ class RewardStore:
 class RewardServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
 
-    def __init__(self, address, store, workers=8):
+    def __init__(self, address, store, workers=8, log=None):
         if workers < 1:
             raise ValueError('workers must be positive')
         self.slots = threading.BoundedSemaphore(workers)
         self.store = store
+        self.log = log or ServiceLog()
         super().__init__(address, Handler)
 
     def process_request(self, request, client_address):
         if not self.slots.acquire(blocking=False):
+            self.log.busy()
             request.sendall(b'HTTP/1.0 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n')
             self.shutdown_request(request)
             return
@@ -202,19 +207,26 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != '/score':
             self.reply(404, {'error': 'Unknown route'})
             return
+        log, started = self.server.log, time.time()
+        log.begin()
+        status, error = 200, None
         try:
             size = int(self.headers.get('Content-Length', '0'))
             if not 0 < size <= 4 * 1024 * 1024:
                 raise ValueError('Invalid request size')
             payload = json.loads(self.rfile.read(size))
-            self.reply(200, self.server.store.grade(payload))
+            result = self.server.store.grade(payload)
         except Conflict as exc:
-            self.reply(409, {'error': str(exc)})
+            status, error = 409, str(exc)
         except (ValueError, KeyError, TypeError) as exc:
-            self.reply(400, {'error': str(exc)})
+            status, error = 400, f'{type(exc).__name__}: {exc}'
         except Exception as exc:
             # A scoring fault is never a valid score of zero.
-            self.reply(503, {'error': type(exc).__name__ + ': ' + str(exc)})
+            status, error = 503, type(exc).__name__ + ': ' + str(exc)
+        try:
+            self.reply(200, result) if status == 200 else self.reply(status, {'error': error})
+        finally:
+            log.end(status, started, error)
 
 
 def main():
@@ -243,10 +255,18 @@ def main():
                     judge_audit_dir=Path(args.cache_dir) / 'judge_attempts',
                     judge_attempts=c['JUDGE_ATTEMPTS'], judge_max_retry_tokens=c['JUDGE_MAX_RETRY_TOKENS'])
     store = RewardStore(args.data_dir, args.cache_dir, grader, protocol)
-    server = RewardServer((args.host, args.port), store, args.workers)
+    log = ServiceLog(Path(args.cache_dir) / 'reward_service.log', float(os.environ.get('REWARD_LOG_SECONDS', '60')))
+    server = RewardServer((args.host, args.port), store, args.workers, log)
     print(json.dumps({'address': server.server_address, 'protocol_id': store.protocol_id,
                       'judge': store.judge_status(), 'task_judge': store.task_judge,
                       'task_errors': store.task_errors}), flush=True)
+    log.write(f'reward service ready | {args.host}:{args.port} | workers: {args.workers} | judge: {c["JUDGE_NAME"]} at '
+              f'{c["JUDGE_URL"]} ({json.dumps(store.judge_status())}) | judge calls in flight: '
+              f'{c["MAX_PENDING"] if capacity else c["JUDGE_CONCURRENCY"]} | KV budget: {capacity or "off"} tokens | '
+              f'chat template: {json.dumps(c["JUDGE_SAMPLING"].get("chat_template_kwargs"))} | protocol: {store.protocol_id}')
+    for task, error in sorted(store.task_errors.items()):
+        log.write(f'reward error | task {task} cannot be graded: {error}')
+    log.run(judge, judge.token_budget)
     try:
         server.serve_forever()
     finally:

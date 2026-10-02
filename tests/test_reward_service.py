@@ -1,4 +1,5 @@
 import concurrent.futures
+import io
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
@@ -13,6 +14,7 @@ from eval_stack.common import digest, write_json, write_jsonl
 from eval_stack.client import Client
 from eval_stack.graders import Grader, GradingError
 from eval_stack.reward_service import RewardStore, RewardServer, Conflict
+from eval_stack.service_log import ServiceLog
 
 
 class RewardServiceTests(unittest.TestCase):
@@ -153,6 +155,33 @@ class RewardServiceTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join()
+
+    def test_failed_requests_and_stats_reach_the_log_without_answers(self):
+        log = ServiceLog(self.root / 'reward_service.log', out=io.StringIO())
+        server = RewardServer(('127.0.0.1', 0), self.store, workers=2, log=log)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        url = f'http://127.0.0.1:{server.server_port}/score'
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, data=json.dumps(self.payload).encode())):
+                pass
+            bad = dict(self.payload, split='main_test')
+            for _ in range(3):  # the same failure is written once a minute, not three times
+                with self.assertRaises(urllib.error.HTTPError) as caught:
+                    urllib.request.urlopen(urllib.request.Request(url, data=json.dumps(bad).encode()))
+                self.assertEqual(caught.exception.code, 400)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+        stats = log.stats_line()
+        self.assertIn('scored: 1 ', stats)
+        self.assertIn('failed: 3', stats)
+        self.assertIn('in flight: 0', stats)
+        self.assertIsNone(log.stats_line())  # nothing new: no line
+        text = (self.root / 'reward_service.log').read_text()
+        self.assertEqual(text.count('reward error | status: 400'), 1)
+        self.assertNotIn('"answer"', text)
 
 
 if __name__ == '__main__':
