@@ -785,6 +785,9 @@ class Grader:
         command = ["docker", "run", "--pull=never", "--name", name, "--rm", "-i", "--network", "none", "--read-only",
                    "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "64",
                    "--memory", "768m", "--cpus", "1", "--user", "65534:65534",
+                   # Soft stack stays the usual 8 MB; no hard cap, because evalplus raises the limit to 4 GiB per
+                   # HumanEval+ check and fails every check (correct or not) on hosts whose Docker caps it.
+                   "--ulimit", "stack=8388608:-1",
                    "--tmpfs", "/tmp:rw,nosuid,size=128m", "--entrypoint", "python",
                    self.code_image, "-m", "eval_stack.code_worker"]
         with self.code_slots:
