@@ -50,5 +50,5 @@ def verify(text, expected):
             spans.append((start, end))
         spans.sort()
         return all(a[1] <= b[0] for a, b in zip(spans, spans[1:]))
-    except (ValueError, TypeError, KeyError):
+    except (ValueError, TypeError, KeyError, AttributeError):  # e.g. "start_time": null is an invalid calendar
         return False

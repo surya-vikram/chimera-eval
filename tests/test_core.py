@@ -127,6 +127,10 @@ class CoreTests(unittest.TestCase):
         event['start_time'] = '10:45'
         self.assertFalse(verify(json.dumps([event]), expected))
         self.assertFalse(verify('[]', expected))
+        # Missing or non-string times make an invalid calendar (scored 0), not a grading crash.
+        for value in (None, 1030, ['10:30']):
+            event['start_time'] = value
+            self.assertFalse(verify(json.dumps([event]), expected))
 
     def test_family_index(self):
         index = HeldoutIndex()
