@@ -29,7 +29,7 @@ import threading
 import uuid
 
 from .common import env, write_json
-from .judging import parse_judgment, judge_messages, protocol_id
+from .judging import parse_judgment, parse_verdicts, judge_messages, rubric_messages, protocol_id
 
 
 class GradingError(RuntimeError):
@@ -463,6 +463,11 @@ JUDGE_USES = ('none', 'on_miss', 'to_pass', 'always')
 
 NCHALLENGE_MARKER = "Does the model's final response satisfy this criterion?"
 
+# Rubrics with this many checks or more are judged in one call (multichallenge advanced: 4-6 checks, ~4.4K-token
+# conversations): it matched one call per check on 99% of answers with a quarter of the calls. Shorter rubrics
+# (multichallenge: 1-2 checks) keep one call per check; combined, the judge passed more of them (13.6% vs 9.3%).
+COMBINED_RUBRIC_CHECKS = 3
+
 
 def rubric_question(content):
     """Nemotron multichallenge checks embed the conversation and the expected verdict. The judge gets
@@ -503,9 +508,22 @@ class Grader:
             raise ValueError('Invalid judge attempt/token limits')
 
     def judge_json(self, payload, quality=False):
+        schema = ('{"score": <integer 1..5>, "mandatory_pass": <boolean>, "reason": <nonempty string>}'
+                  if quality else '{"verdict": <boolean>, "reason": <nonempty string>}')
+        return self._judge(judge_messages(payload, quality), lambda response: parse_judgment(response, quality),
+                           schema, quality, {"type": "json_object"})
+
+    def judge_verdicts(self, conversation, questions):
+        """One judge call for all of a rubric's criteria; returns {'verdicts': [bool per criterion], ...}."""
+        schema = '{"verdicts": [' + ', '.join(['<boolean>'] * len(questions)) + '], "reason": <nonempty string>}'
+        # No JSON mode: the reply ends in a fenced block, which JSON mode would forbid.
+        return self._judge(rubric_messages(conversation, questions),
+                           lambda response: parse_verdicts(response, len(questions)), schema, False, None)
+
+    def _judge(self, messages, parse, schema, quality, response_format):
         if self.judge is None:
             raise GradingError("Judge endpoint required")
-        messages = judge_messages(payload, quality)
+        first_messages = messages
         prompt_tokens = self.judge.token_count(messages)
         if prompt_tokens + self.judge_max_tokens > self.judge_context:
             raise GradingError("Judge context overflow; no truncation permitted")
@@ -521,9 +539,9 @@ class Grader:
                      'sampling':getattr(self.judge,'sampling',None)}
             response = None
             try:
-                response = self.judge.complete(messages, budget, response_format={"type":"json_object"})
+                response = self.judge.complete(messages, budget, response_format=response_format)
                 trace['response'] = response
-                value, fenced = parse_judgment(response, quality)
+                value, fenced = parse(response)
                 trace.update(status='valid', parsed=value.copy(), fenced=fenced)
                 value['usage'] = response.get('usage', {})
                 value['audit_ids'] = audit_ids + [ident]
@@ -540,9 +558,7 @@ class Grader:
                 elif response:
                     # Change the retry instruction, not the candidate or its reference.
                     # Repeating a greedy malformed response unchanged is ineffective.
-                    schema = ('{"score": <integer 1..5>, "mandatory_pass": <boolean>, "reason": <nonempty string>}'
-                              if quality else '{"verdict": <boolean>, "reason": <nonempty string>}')
-                    messages = judge_messages(payload, quality) + [{'role':'user', 'content':
+                    messages = first_messages + [{'role':'user', 'content':
                         'Your previous attempt could not be parsed. Re-evaluate the same case and return ONLY '
                         'one JSON object with exactly this schema: ' + schema + '. No commentary or extra keys.'}]
                     prompt_tokens = self.judge.token_count(messages)
@@ -665,21 +681,26 @@ class Grader:
             checks = meta["checks"]
             if not checks:
                 raise GradingError("Empty rubric")
-            verdicts, raw = [], []
-            # The judge reads the completed conversation once, the candidate as its final turn.
+            # The judge reads the completed conversation, the candidate as its final turn.
             conversation = row["messages"] + [{"role": "assistant", "content": text}]
-            # Checks are independent: ask them concurrently (same verdicts, about one call's latency
-            # instead of one per check, which made long rubrics the last answers graded in a step).
-            from concurrent.futures import ThreadPoolExecutor
-            ask = lambda check: self.judge_json({"question": rubric_question(check["content"]), "conversation": conversation})
-            with ThreadPoolExecutor(max_workers=len(checks)) as pool:
-                judgments = list(pool.map(ask, checks))
-            for check, j in zip(checks, judgments):
-                passed = j["verdict"] == (check.get("pass_criteria", "YES") == "YES")
+            questions = [rubric_question(check["content"]) for check in checks]
+            if len(checks) >= COMBINED_RUBRIC_CHECKS:
+                combined = self.judge_verdicts(conversation, questions)
+                answers, raw = combined["verdicts"], [combined]
+            else:
+                # Checks are independent: ask them concurrently (same verdicts, about one call's latency
+                # instead of one per check, which made long rubrics the last answers graded in a step).
+                from concurrent.futures import ThreadPoolExecutor
+                ask = lambda question: self.judge_json({"question": question, "conversation": conversation})
+                with ThreadPoolExecutor(max_workers=len(checks)) as pool:
+                    raw = list(pool.map(ask, questions))
+                answers = [j["verdict"] for j in raw]
+            verdicts = []
+            for check, answer in zip(checks, answers):
+                passed = answer == (check.get("pass_criteria", "YES") == "YES")
                 if check.get("source") == "user" and check.get("is_misalignment_check"):
                     passed = not passed
                 verdicts.append(passed)
-                raw.append(j)
             return result(all(verdicts), all(verdicts), checks=verdicts, judge=raw,
                           fraction_passed=sum(verdicts) / len(verdicts))
         if kind == "instruction":

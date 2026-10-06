@@ -83,10 +83,41 @@ class CoreTests(unittest.TestCase):
                 verdict = 'Check two?' not in text
                 return {'text': json.dumps({'verdict': verdict, 'reason': 'fixture'}), 'finish_reason': 'stop', 'usage': {}}
         judge = SlowJudge()
-        checks = [{'content': 'Check one?'}, {'content': 'Check two?'}, {'content': 'Check three?'}]
+        checks = [{'content': 'Check one?'}, {'content': 'Check two?'}]
         out = Grader(judge).grade(row('rubric', checks=checks), response('content'))
-        self.assertEqual(out['components']['checks'], [True, False, True])  # verdicts stay in check order
-        self.assertEqual(judge.peak, 3)  # all checks in flight together
+        self.assertEqual(out['components']['checks'], [True, False])  # verdicts stay in check order
+        self.assertEqual(judge.peak, 2)  # all checks in flight together
+
+    def test_long_rubrics_are_judged_in_one_call(self):
+        class OneCall:
+            def __init__(self): self.calls = []
+            def token_count(self, messages): return 10
+            def complete(self, messages, budget, response_format=None, **kwargs):
+                self.calls.append((messages, response_format))
+                # Judges sometimes quote their booleans; the verdicts still count, in criterion order.
+                return {'text': 'Checked each criterion.\n```json\n{"verdicts": [true, "false", true, true], '
+                                '"reason": "criterion 2 fails"}\n```', 'finish_reason': 'stop', 'usage': {}}
+        judge = OneCall()
+        checks = [{'content': f'Check {i}?'} for i in range(3)] + [{'content': 'Check 3?', 'pass_criteria': 'NO'}]
+        out = Grader(judge).grade(row('rubric', checks=checks), response('content'))
+        self.assertEqual(len(judge.calls), 1)
+        messages, response_format = judge.calls[0]
+        self.assertIsNone(response_format)  # a fenced block is asked for, which JSON mode would forbid
+        self.assertIn('exactly 4 unquoted booleans', messages[0]['content'])
+        self.assertEqual([c['question'] for c in json.loads(messages[1]['content'])['criteria']],
+                         ['Check 0?', 'Check 1?', 'Check 2?', 'Check 3?'])
+        self.assertEqual(out['components']['checks'], [True, False, True, False])
+        self.assertEqual(out['score'], 0)
+
+    def test_a_combined_verdict_list_of_the_wrong_length_is_ungradable(self):
+        from eval_stack.graders import Ungradable
+        class Short:
+            def token_count(self, messages): return 10
+            def complete(self, *a, **kw):
+                return {'text': '```json\n{"verdicts": [true, true], "reason": "x"}\n```', 'finish_reason': 'stop'}
+        with self.assertRaises(Ungradable):
+            Grader(Short(), judge_attempts=1).grade(row('rubric', checks=[{'content': f'C{i}?'} for i in range(3)]),
+                                                    response('content'))
 
     def test_qa_aliases(self):
         self.assertEqual(answer_metrics('the United States', ['United States']), (1,1.))

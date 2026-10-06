@@ -122,22 +122,36 @@ class ReliabilityTests(unittest.TestCase):
         self.assertTrue(g.judge_json({'question':'fixture'})['verdict'])
         self.assertNotEqual(j.messages[0],j.messages[1])
 
-    def test_strict_json_boundaries(self):
+    def test_json_boundaries(self):
         good='{"verdict":true,"reason":"supported"}'
-        for text in (good,'```json\n'+good+'\n```'):
-            self.assertTrue(parse_judgment({'text':text,'finish_reason':'stop'})[0]['verdict'])
-        for text in ('Explanation '+good,good+good,'```json\n'+good+'\n``` extra',
-                     '{"verdict":true,"verdict":false,"reason":"x"}',
-                     '{"verdict":"true","reason":"x"}',
-                     '{"verdict":true}', '{"verdict":true,"reason":"x","extra":0}'):
+        # With one judge attempt a rejected reply is an ungradable answer, so harmless wrapping is read:
+        # a fence, prose around the object (the last object counts), quoted booleans, LaTeX backslashes.
+        for text in (good,'```json\n'+good+'\n```','Explanation '+good,'```json\n'+good+'\n``` extra',
+                     '{"verdict":false,"reason":"x"} then '+good,'{"verdict":"true","reason":"x"}',
+                     r'{"verdict":true,"reason":"the \(x^2\) term"}'):
+            self.assertTrue(parse_judgment({'text':text,'finish_reason':'stop'})[0]['verdict'], text)
+        self.assertEqual(parse_judgment({'text':r'{"verdict":true,"reason":"a \(b\) \\ c"}','finish_reason':'stop'})[0]['reason'],
+                         r'a \(b\) \ c')
+        # Ambiguous or incomplete replies are never guessed.
+        for text in ('{"verdict":true,"verdict":false,"reason":"x"}',
+                     '{"verdict":true}', '{"verdict":true,"reason":"x","extra":0}', '{"verdict":1,"reason":"x"}', ''):
             with self.assertRaises(ValueError):parse_judgment({'text':text,'finish_reason':'stop'})
         with self.assertRaises(ValueError):parse_judgment({'text':good,'finish_reason':'length'})
         with self.assertRaises(ValueError):parse_judgment({'text':'','reasoning':good,'finish_reason':'stop'})
 
+    def test_every_judge_prompt_asks_for_brief_reasoning(self):
+        from eval_stack.judging import BRIEF, judge_messages, rubric_messages
+        for messages in (judge_messages({'q': 1}), judge_messages({'q': 1}, True), rubric_messages([], ['a?', 'b?', 'c?'])):
+            self.assertIn(BRIEF, messages[0]['content'])
+            self.assertNotIn('Reason carefully', messages[0]['content'])
+
     def test_quality_types_and_ranges(self):
-        for score in (True,0,6,4.0,'4',float('nan')):
+        for score in (True,0,6,4.5,'4.5','four',float('nan')):
             with self.assertRaises(ValueError):
                 parse_judgment({'text':json.dumps({'score':score,'mandatory_pass':True,'reason':'x'}),'finish_reason':'stop'},True)
+        for score in (4, 4.0, '4'):  # a whole score written as a float or a string is still that score
+            value = parse_judgment({'text':json.dumps({'score':score,'mandatory_pass':'true','reason':'x'}),'finish_reason':'stop'},True)[0]
+            self.assertEqual((value['score'], value['mandatory_pass']), (4, True))
 
     def test_retry_budget_and_durable_trace(self):
         class Judge:
