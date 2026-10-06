@@ -12,7 +12,7 @@ import urllib.request
 
 from eval_stack.common import digest, write_json, write_jsonl
 from eval_stack.client import Client
-from eval_stack.graders import Grader, GradingError
+from eval_stack.graders import Grader, GradingError, Ungradable
 from eval_stack.reward_service import RewardStore, RewardServer, Conflict
 from eval_stack.service_log import ServiceLog
 
@@ -155,6 +155,30 @@ class RewardServiceTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join()
+
+    def test_an_answer_the_judge_cannot_judge_is_422_not_a_fault(self):
+        log = ServiceLog(self.root / 'reward_service.log', out=io.StringIO())
+        server = RewardServer(('127.0.0.1', 0), self.store, workers=2, log=log)
+        def cut_off(row, response):
+            raise Ungradable('Invalid judge output; ValueError: Judge did not finish')
+        self.store.grader = type('CutOffGrader', (), {'grade': staticmethod(cut_off)})()
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                urllib.request.urlopen(urllib.request.Request(f'http://127.0.0.1:{server.server_port}/score',
+                                                              data=json.dumps(self.payload).encode()))
+            self.assertEqual(caught.exception.code, 422)
+            body = json.loads(caught.exception.read())
+            self.assertTrue(body['ungradable'])
+            self.assertIn('Judge did not finish', body['error'])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+        stats = log.stats_line()
+        self.assertIn('failed: 0', stats)
+        self.assertIn('ungradable: 1', stats)
 
     def test_failed_requests_and_stats_reach_the_log_without_answers(self):
         log = ServiceLog(self.root / 'reward_service.log', out=io.StringIO())

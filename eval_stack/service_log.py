@@ -69,12 +69,12 @@ class ServiceLog:
             counts, latencies, self.counts, self.latencies = self.counts, self.latencies, collections.Counter(), []
             in_flight = self.in_flight
         scored = counts.get(200, 0)
-        failed = sum(v for k, v in counts.items() if k not in (200, 'busy'))
-        if not (scored or failed or counts.get('busy') or in_flight):
+        failed = sum(v for k, v in counts.items() if k not in (200, 422, 'busy'))
+        if not (scored or failed or counts.get(422) or counts.get('busy') or in_flight):
             return None
         parts = ['reward stats', f'scored: {scored} ({scored / self.interval:.1f}/s)', f'in flight: {in_flight}',
                  f'score p50/p95: {seconds(latencies, .5)}/{seconds(latencies, .95)}', f'failed: {failed}',
-                 f'busy rejects: {counts.get("busy", 0)}']
+                 f'ungradable: {counts.get(422, 0)}', f'busy rejects: {counts.get("busy", 0)}']
         if judge is not None:
             j = judge.take_stats()
             parts += [f'judge calls: {j["calls"]}', f'judge in flight: {j["in_flight"]}',

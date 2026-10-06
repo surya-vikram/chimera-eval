@@ -7,7 +7,8 @@ import io
 from unittest.mock import patch
 from eval_stack.runner import settings, context_limit
 from eval_stack.judging import parse_judgment
-from eval_stack.graders import Grader, GradingError
+from eval_stack.client import EndpointError
+from eval_stack.graders import Grader, GradingError, Ungradable
 from eval_stack.rl_rewards import validated_group, InvalidRewardGroup
 from eval_stack.data_revision import issues, revise_row
 from eval_stack.metrics import aggregate
@@ -42,8 +43,24 @@ class ReliabilityTests(unittest.TestCase):
                 self.calls+=1
                 return {'text':'not JSON','finish_reason':'stop'}
         j=Judge()
-        with self.assertRaises(GradingError):Grader(j,100,1000).judge_json({'question':'fixture'})
+        with self.assertRaises(Ungradable):Grader(j,100,1000).judge_json({'question':'fixture'})
         self.assertEqual(j.calls,3)
+
+    def test_cut_off_judge_is_ungradable_but_a_missing_judge_is_a_fault(self):
+        class CutOff:
+            def token_count(self,m):return 10
+            def complete(self,*a,**kw):return {'text':'','finish_reason':'length'}
+        with self.assertRaises(Ungradable) as caught:Grader(CutOff(),100,1000,judge_max_retry_tokens=400).judge_json({'question':'q'})
+        self.assertIn('Judge did not finish',str(caught.exception))
+        class Down:
+            calls=0
+            def token_count(self,m):return 10
+            def complete(self,*a,**kw):
+                self.calls+=1
+                if self.calls==1:raise EndpointError('connection refused')
+                return {'text':'','finish_reason':'length'}
+        with self.assertRaises(GradingError) as caught:Grader(Down(),100,1000).judge_json({'question':'q'})
+        self.assertNotIsInstance(caught.exception,Ungradable)
 
     def test_task_budget_configuration(self):
         with patch.dict('os.environ', {'TASK_MAX_TOKENS_JSON':'{"math500":32768}'}):

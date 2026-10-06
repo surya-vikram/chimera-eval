@@ -36,6 +36,11 @@ class GradingError(RuntimeError):
     pass
 
 
+class Ungradable(GradingError):
+    """The judge answered every attempt but never gave a usable verdict (cut off or unparseable).
+    Asking again does not help, so the reward service says so instead of reporting a fault."""
+
+
 def result(score, passed, **components):
     return {"status": "valid", "score": float(score), "passed": passed,
             "components": components, "verifier_version": "chimera-eval/0.2.0"}
@@ -505,6 +510,7 @@ class Grader:
         if prompt_tokens + self.judge_max_tokens > self.judge_context:
             raise GradingError("Judge context overflow; no truncation permitted")
         errors, audit_ids = [], []
+        unanswered = False  # an attempt got no judge response at all (transport, timeout)
         budget = self.judge_max_tokens
         from pathlib import Path
         for attempt in range(self.judge_attempts):
@@ -526,6 +532,7 @@ class Grader:
             except Exception as e:
                 trace.update(status='error', error=f'{type(e).__name__}: {e}')
                 errors.append(trace['error'])
+                unanswered = unanswered or response is None
                 if response and response.get('finish_reason') == 'length':
                     next_budget = min(budget * 2, self.judge_max_retry_tokens)
                     if prompt_tokens + next_budget <= self.judge_context:
@@ -545,7 +552,9 @@ class Grader:
                 audit_ids.append(ident)
                 if self.judge_audit_dir:
                     write_json(Path(self.judge_audit_dir)/(ident+'.json'), trace)
-        raise GradingError("Invalid judge output; " + "; ".join(errors))
+        if unanswered:
+            raise GradingError("Invalid judge output; " + "; ".join(errors))
+        raise Ungradable("Invalid judge output; " + "; ".join(errors))
 
     def grade(self, row, response):
         answer = answer_text(response['text'])

@@ -21,7 +21,7 @@ import urllib.request
 
 from .client import Client
 from .common import digest, read_jsonl, validate_record, write_json
-from .graders import JUDGE_USES, Grader, judge_use, quarantine_reason
+from .graders import JUDGE_USES, Grader, Ungradable, judge_use, quarantine_reason
 from .runner import settings
 from .service_log import ServiceLog
 
@@ -220,11 +220,17 @@ class Handler(BaseHTTPRequestHandler):
             status, error = 409, str(exc)
         except (ValueError, KeyError, TypeError) as exc:
             status, error = 400, f'{type(exc).__name__}: {exc}'
+        except Ungradable as exc:
+            # The judge could not judge this answer; a retry asks the same question again.
+            status, error = 422, type(exc).__name__ + ': ' + str(exc)
         except Exception as exc:
             # A scoring fault is never a valid score of zero.
             status, error = 503, type(exc).__name__ + ': ' + str(exc)
         try:
-            self.reply(200, result) if status == 200 else self.reply(status, {'error': error})
+            if status == 200:
+                self.reply(200, result)
+            else:
+                self.reply(status, {'error': error, **({'ungradable': True} if status == 422 else {})})
         finally:
             log.end(status, started, error)
 
