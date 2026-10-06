@@ -144,6 +144,7 @@ class ReliabilityTests(unittest.TestCase):
         for messages in (judge_messages({'q': 1}), judge_messages({'q': 1}, True), rubric_messages([], ['a?', 'b?', 'c?'])):
             self.assertIn(BRIEF, messages[0]['content'])
             self.assertNotIn('Reason carefully', messages[0]['content'])
+            self.assertIn('Do not copy, quote or restate any of the input above', messages[1]['content'])
 
     def test_quality_types_and_ranges(self):
         for score in (True,0,6,4.5,'4.5','four',float('nan')):

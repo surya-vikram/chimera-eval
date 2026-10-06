@@ -1,5 +1,6 @@
 import copy
 import json
+from eval_stack.judging import judge_payload
 from pathlib import Path
 import tempfile
 import unittest
@@ -103,8 +104,10 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(len(judge.calls), 1)
         messages, response_format = judge.calls[0]
         self.assertIsNone(response_format)  # a fenced block is asked for, which JSON mode would forbid
+        self.assertTrue(messages[1]['content'].startswith('{"criteria"'))  # short criteria before the long conversation
+        self.assertTrue(messages[1]['content'].endswith('begin directly with criterion 1.'))
         self.assertIn('exactly 4 unquoted booleans', messages[0]['content'])
-        self.assertEqual([c['question'] for c in json.loads(messages[1]['content'])['criteria']],
+        self.assertEqual([c['question'] for c in judge_payload(messages)['criteria']],
                          ['Check 0?', 'Check 1?', 'Check 2?', 'Check 3?'])
         self.assertEqual(out['components']['checks'], [True, False, True, False])
         self.assertEqual(out['score'], 0)

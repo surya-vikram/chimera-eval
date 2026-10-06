@@ -3,7 +3,7 @@ import json
 import re
 from .common import digest
 
-PROTOCOL_VERSION = 'chimera-judge/0.3.0'
+PROTOCOL_VERSION = 'chimera-judge/0.3.1'
 
 
 def reply_json(text):
@@ -95,7 +95,13 @@ def judge_messages(payload, quality=False):
                     'Return one JSON object only in your final answer, without Markdown fences or extra prose. '
                     + BRIEF)
     return [{'role':'system','content':instruction},
-            {'role':'user','content':json.dumps(payload, ensure_ascii=False)}]
+            {'role':'user','content':json.dumps(payload, ensure_ascii=False) + REMIND}]
+
+
+# The judge starts its reasoning by echoing the start of the input; on long inputs that echo used its whole
+# budget. A reminder after the data cut ungradable answers from 0.29% to 0.06% of 1,741 (none in multichallenge).
+REMIND = ('\n\nNow evaluate. Do not copy, quote or restate any of the input above, and do not work the task out '
+          'yourself; begin directly with your evaluation.')
 
 
 # The judge spent long outputs restating the input and working the task out itself; with this instruction
@@ -119,10 +125,12 @@ def rubric_messages(conversation, questions):
         f'exactly two keys: "verdicts", a list of exactly {n} unquoted booleans (true or false), one per criterion '
         f'in order, and "reason", one nonempty sentence. For example:\n'
         f'```json\n{{"verdicts": [{example}], "reason": "Criterion 1 is not met because ..."}}\n```')
-    payload = {'conversation': conversation,
-               'criteria': [{'id': i + 1, 'question': q} for i, q in enumerate(questions)]}
+    # Criteria first: the judge's opening echo then covers the short criteria, not the long conversation.
+    payload = {'criteria': [{'id': i + 1, 'question': q} for i, q in enumerate(questions)],
+               'conversation': conversation}
     return [{'role': 'system', 'content': instruction},
-            {'role': 'user', 'content': json.dumps(payload, ensure_ascii=False)}]
+            {'role': 'user', 'content': json.dumps(payload, ensure_ascii=False)
+             + REMIND.replace('begin directly with your evaluation', 'begin directly with criterion 1')}]
 
 
 def parse_verdicts(response, n):
@@ -148,8 +156,13 @@ def parse_verdicts(response, n):
     return {'verdicts': verdicts, 'reason': reason if isinstance(reason, str) else ''}, fenced
 
 
+def judge_payload(messages):
+    """The data a judge request carries (its user message is the JSON payload, then the reminder)."""
+    return json.JSONDecoder().raw_decode(messages[1]['content'])[0]
+
+
 def protocol_id():
     import inspect
     return digest([PROTOCOL_VERSION, inspect.getsource(reply_json), inspect.getsource(boolean),
-                   inspect.getsource(parse_judgment), inspect.getsource(judge_messages), BRIEF,
+                   inspect.getsource(parse_judgment), inspect.getsource(judge_messages), BRIEF, REMIND,
                    inspect.getsource(rubric_messages), inspect.getsource(parse_verdicts)])

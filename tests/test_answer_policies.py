@@ -1,5 +1,6 @@
 """What earns reward: reasoning tags, MCQA answer formats, structured data inside prose."""
 import json
+from eval_stack.judging import judge_payload
 import unittest
 
 from eval_stack.graders import (MCQA_FORMATS, OTHER_FORMAT_CREDIT, Grader, answer_text,
@@ -16,7 +17,7 @@ class Judge:
         return 10
 
     def complete(self, messages, max_tokens, **kwargs):
-        self.payloads.append(json.loads(messages[-1]['content']))
+        self.payloads.append(judge_payload(messages))
         return {'text': json.dumps({'verdict': self.verdict, 'reason': 'fixture'}), 'finish_reason': 'stop', 'usage': {}}
 
 
